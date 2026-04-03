@@ -90,10 +90,12 @@ Il parcourt les emails déjà présents dans `emailFolder/<account.name>/`, lit 
 
 Dans ce dossier par email, on retrouve :
 - un fichier JSON avec les métadonnées extraites
+- un fichier XML avec l’arborescence MIME utile et les contenus `text/plain` / `text/html`
 - les pièces jointes extraites, en conservant leur nom d’origine
 
 Exemple avec `parseIaFolder: _parse-ai` pour un compte `Denis 1` :
 - `Denis 1/_parse-ai/Contact/Mon email/Mon email.json`
+- `Denis 1/_parse-ai/Contact/Mon email/Mon email.xml`
 - `Denis 1/_parse-ai/Contact/Mon email/contrat.pdf`
 
 Le JSON contient notamment :
@@ -103,6 +105,14 @@ Le JSON contient notamment :
 - la date d’expédition au format ISO
 - le sujet
 - la liste des pièces jointes avec leur nom d’origine
+
+Le XML :
+- ignore les pièces jointes
+- conserve la structure MIME utile pour distinguer les différentes parties du message
+- privilégie `text/plain` quand une version HTML équivalente existe dans le mail
+- convertit `text/html` en Markdown quand aucune version texte n’existe
+- embarque les contenus exportés en `CDATA`
+- inclut aussi le JSON de métadonnées dans une section `doka-custom`
 
 ### Lancer parse-ia
 ```bash

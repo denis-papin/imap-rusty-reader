@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use html_escape::decode_html_entities;
+use html_escape::encode_double_quoted_attribute;
 use log::{info, warn};
 use mailparse::{DispositionType, MailHeaderMap, ParsedMail};
 use regex::Regex;
@@ -14,6 +16,7 @@ use crate::utils::{
 };
 
 const EMBEDDED_IMAGE_MAX_BYTES: usize = 30 * 1024;
+const HTML_TO_MARKDOWN_MAX_CHARS: usize = 250_000;
 
 #[derive(Debug)]
 pub struct BackupParser {
@@ -184,8 +187,9 @@ impl BackupParser {
 
             let payload = serde_json::to_string_pretty(&record)?;
             let json_path = email_output_folder.join(format!("{}.json", email_stem));
-            fs::write(&json_path, payload)
+            fs::write(&json_path, &payload)
                 .with_context(|| format!("unable to write {}", json_path.display()))?;
+            self.write_email_xml(&parsed, &email_output_folder, &record, &payload)?;
             self.embed_metadata_into_attachments(&attachments, &json_path)?;
 
             Ok(())
@@ -279,6 +283,40 @@ impl BackupParser {
         }
 
         Ok(())
+    }
+
+    fn write_email_xml(
+        &self,
+        parsed: &ParsedMail<'_>,
+        email_output_folder: &Path,
+        record: &ParsedEmailRecord,
+        json_payload: &str,
+    ) -> Result<()> {
+        let mut xml = String::new();
+        xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        xml.push_str("<email-content");
+        push_xml_attr(&mut xml, "parsing-folder", &record.parsing_folder);
+        push_xml_attr(&mut xml, "email-folder", &record.email_folder);
+        push_xml_attr(&mut xml, "email-file-name", &record.email_file_name);
+        if let Some(message_id) = &record.message_id {
+            push_xml_attr(&mut xml, "message-id", message_id);
+        }
+        if let Some(expedition_date) = &record.expedition_date {
+            push_xml_attr(&mut xml, "expedition-date", expedition_date);
+        }
+        push_xml_attr(&mut xml, "subject", &record.subject);
+        xml.push_str(">\n");
+
+        xml.push_str("  <doka-custom format=\"json\"><![CDATA[");
+        xml.push_str(&wrap_cdata(json_payload));
+        xml.push_str("]]></doka-custom>\n");
+        xml.push_str("  <mime-structure>\n");
+        append_part_xml(parsed, "1", 2, &mut xml)?;
+        xml.push_str("  </mime-structure>\n");
+        xml.push_str("</email-content>\n");
+
+        let xml_path = email_output_folder.join(format!("{}.xml", record.email_folder));
+        fs::write(&xml_path, xml).with_context(|| format!("unable to write {}", xml_path.display()))
     }
 
     fn cleanup_failed_email_folder(&self, email_output_folder: &Path) {
@@ -475,4 +513,253 @@ fn parse_iso_timestamp(raw: Option<String>) -> Option<String> {
     let timestamp = mailparse::dateparse(&raw).ok()?;
     let datetime = DateTime::<Utc>::from_timestamp(timestamp, 0)?;
     Some(datetime.to_rfc3339())
+}
+
+fn append_part_xml(
+    part: &ParsedMail<'_>,
+    path: &str,
+    depth: usize,
+    xml: &mut String,
+) -> Result<bool> {
+    if is_attachment_part(part) {
+        return Ok(false);
+    }
+
+    if part
+        .ctype
+        .mimetype
+        .eq_ignore_ascii_case("multipart/alternative")
+    {
+        return append_alternative_part_xml(part, path, depth, xml);
+    }
+
+    if part.ctype.mimetype.eq_ignore_ascii_case("message/rfc822") {
+        let raw = part.get_body_raw()?;
+        let nested = mailparse::parse_mail(&raw)?;
+        indent(xml, depth);
+        xml.push_str("<part");
+        push_xml_attr(xml, "path", path);
+        push_xml_attr(xml, "kind", "message");
+        push_xml_attr(xml, "mime-type", &part.ctype.mimetype);
+        push_common_part_attrs(xml, part);
+        xml.push_str(">\n");
+        let nested_written = append_part_xml(&nested, &format!("{path}.1"), depth + 1, xml)?;
+        if !nested_written {
+            indent(xml, depth + 1);
+            xml.push_str("<content format=\"raw-message\"><![CDATA[");
+            xml.push_str(&wrap_cdata(&String::from_utf8_lossy(&raw)));
+            xml.push_str("]]></content>\n");
+        }
+        indent(xml, depth);
+        xml.push_str("</part>\n");
+        return Ok(true);
+    }
+
+    if !part.subparts.is_empty() {
+        let mut children = String::new();
+        let mut child_count = 0usize;
+        for (index, subpart) in part.subparts.iter().enumerate() {
+            if append_part_xml(
+                subpart,
+                &format!("{path}.{}", index + 1),
+                depth + 1,
+                &mut children,
+            )? {
+                child_count += 1;
+            }
+        }
+
+        if child_count == 0 {
+            return Ok(false);
+        }
+
+        indent(xml, depth);
+        xml.push_str("<part");
+        push_xml_attr(xml, "path", path);
+        push_xml_attr(xml, "kind", "multipart");
+        push_xml_attr(xml, "mime-type", &part.ctype.mimetype);
+        push_common_part_attrs(xml, part);
+        xml.push_str(">\n");
+        xml.push_str(&children);
+        indent(xml, depth);
+        xml.push_str("</part>\n");
+        return Ok(true);
+    }
+
+    if is_textual_content_part(part) {
+        let content = part.get_body()?;
+        indent(xml, depth);
+        xml.push_str("<part");
+        push_xml_attr(xml, "path", path);
+        push_xml_attr(xml, "kind", "body");
+        push_xml_attr(xml, "mime-type", &part.ctype.mimetype);
+        push_common_part_attrs(xml, part);
+        xml.push_str(">\n");
+        indent(xml, depth + 1);
+        let (format, content) = if part.ctype.mimetype.eq_ignore_ascii_case("text/html") {
+            ("markdown", html_to_markdown(&content))
+        } else {
+            ("plain", content)
+        };
+        xml.push_str("<content");
+        push_xml_attr(xml, "format", format);
+        if part.ctype.mimetype.eq_ignore_ascii_case("text/html") {
+            push_xml_attr(xml, "source-format", "html");
+        }
+        xml.push_str("><![CDATA[");
+        xml.push_str(&wrap_cdata(&content));
+        xml.push_str("]]></content>\n");
+        indent(xml, depth);
+        xml.push_str("</part>\n");
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+fn append_alternative_part_xml(
+    part: &ParsedMail<'_>,
+    path: &str,
+    depth: usize,
+    xml: &mut String,
+) -> Result<bool> {
+    if let Some((index, plain_part)) = part.subparts.iter().enumerate().find(|(_, subpart)| {
+        !is_attachment_part(subpart) && subpart.ctype.mimetype.eq_ignore_ascii_case("text/plain")
+    }) {
+        return append_part_xml(plain_part, &format!("{path}.{}", index + 1), depth, xml);
+    }
+
+    if let Some((index, html_part)) = part.subparts.iter().enumerate().find(|(_, subpart)| {
+        !is_attachment_part(subpart) && subpart.ctype.mimetype.eq_ignore_ascii_case("text/html")
+    }) {
+        return append_part_xml(html_part, &format!("{path}.{}", index + 1), depth, xml);
+    }
+
+    for (index, subpart) in part.subparts.iter().enumerate() {
+        if append_part_xml(subpart, &format!("{path}.{}", index + 1), depth, xml)? {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn is_attachment_part(part: &ParsedMail<'_>) -> bool {
+    let disposition = part.get_content_disposition();
+    if matches!(disposition.disposition, DispositionType::Attachment) {
+        return true;
+    }
+
+    attachment_name(part).is_some() && !is_textual_content_part(part)
+}
+
+fn is_textual_content_part(part: &ParsedMail<'_>) -> bool {
+    part.ctype.mimetype.eq_ignore_ascii_case("text/plain")
+        || part.ctype.mimetype.eq_ignore_ascii_case("text/html")
+}
+
+fn push_common_part_attrs(xml: &mut String, part: &ParsedMail<'_>) {
+    if let Some(charset) = part.ctype.params.get("charset") {
+        push_xml_attr(xml, "charset", charset);
+    }
+    if let Some(boundary) = part.ctype.params.get("boundary") {
+        push_xml_attr(xml, "boundary", boundary);
+    }
+    if let Some(transfer_encoding) = part.headers.get_first_value("Content-Transfer-Encoding") {
+        push_xml_attr(xml, "transfer-encoding", transfer_encoding.trim());
+    }
+    let disposition = part.get_content_disposition();
+    match disposition.disposition {
+        DispositionType::Attachment => push_xml_attr(xml, "disposition", "attachment"),
+        DispositionType::Inline => push_xml_attr(xml, "disposition", "inline"),
+        DispositionType::FormData => push_xml_attr(xml, "disposition", "form-data"),
+        DispositionType::Extension(ref value) => push_xml_attr(xml, "disposition", value),
+    }
+    if let Some(content_id) = part.headers.get_first_value("Content-ID") {
+        push_xml_attr(xml, "content-id", content_id.trim());
+    }
+}
+
+fn push_xml_attr(xml: &mut String, name: &str, value: &str) {
+    xml.push(' ');
+    xml.push_str(name);
+    xml.push_str("=\"");
+    xml.push_str(&encode_double_quoted_attribute(value));
+    xml.push('"');
+}
+
+fn indent(xml: &mut String, depth: usize) {
+    for _ in 0..depth {
+        xml.push_str("  ");
+    }
+}
+
+fn wrap_cdata(value: &str) -> String {
+    value.replace("]]>", "]]]]><![CDATA[>")
+}
+
+fn html_to_markdown(value: &str) -> String {
+    let truncated = if value.len() > HTML_TO_MARKDOWN_MAX_CHARS {
+        &value[..HTML_TO_MARKDOWN_MAX_CHARS]
+    } else {
+        value
+    };
+
+    let without_noise = strip_html_blocks(truncated);
+    let with_line_breaks = Regex::new(r"(?is)<\s*br\s*/?\s*>")
+        .expect("invalid regex")
+        .replace_all(&without_noise, "\n");
+    let with_block_breaks =
+        Regex::new(r"(?is)</\s*(p|div|section|article|tr|table|li|ul|ol|h[1-6])\s*>")
+            .expect("invalid regex")
+            .replace_all(&with_line_breaks, "\n\n");
+    let with_bullets = Regex::new(r"(?is)<\s*li\b[^>]*>")
+        .expect("invalid regex")
+        .replace_all(&with_block_breaks, "- ");
+    let with_links =
+        Regex::new(r#"(?is)<\s*a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>(.*?)</\s*a\s*>"#)
+            .expect("invalid regex")
+            .replace_all(&with_bullets, "[$2]($1)");
+    let without_tags = Regex::new(r"(?is)<[^>]+>")
+        .expect("invalid regex")
+        .replace_all(&with_links, " ");
+
+    let decoded = decode_html_entities(&without_tags).into_owned();
+    let normalized_newlines = Regex::new(r"\r\n?")
+        .expect("invalid regex")
+        .replace_all(&decoded, "\n");
+    let collapsed_spaces = Regex::new(r"[ \t]+")
+        .expect("invalid regex")
+        .replace_all(&normalized_newlines, " ");
+    let collapsed_blank_lines = Regex::new(r"\n{3,}")
+        .expect("invalid regex")
+        .replace_all(&collapsed_spaces, "\n\n");
+    let mut markdown = collapsed_blank_lines.trim().to_string();
+
+    if value.len() > HTML_TO_MARKDOWN_MAX_CHARS {
+        markdown.push_str("\n\n[message truncated during HTML to Markdown conversion]");
+    }
+
+    markdown
+}
+
+fn strip_html_blocks(value: &str) -> String {
+    let mut cleaned = value.to_string();
+    for tag in ["script", "style", "head", "title", "svg", "noscript"] {
+        let pattern = format!(r"(?is)<\s*{tag}\b[^>]*>.*?</\s*{tag}\s*>");
+        cleaned = Regex::new(&pattern)
+            .expect("invalid regex")
+            .replace_all(&cleaned, " ")
+            .into_owned();
+    }
+
+    cleaned = Regex::new(r"(?is)<\s*meta\b[^>]*>")
+        .expect("invalid regex")
+        .replace_all(&cleaned, " ")
+        .into_owned();
+
+    Regex::new(r"(?is)<!--.*?-->")
+        .expect("invalid regex")
+        .replace_all(&cleaned, " ")
+        .into_owned()
 }
