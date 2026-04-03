@@ -10,6 +10,8 @@ const DEFAULT_DEFINITION_PATH: &str = "./config.yml";
 pub struct Config {
     #[serde(rename = "emailFolder")]
     pub email_folder: String,
+    #[serde(rename = "parseIaFolder", default = "default_parse_ia_folder")]
+    pub parse_ia_folder: String,
     pub accounts: Vec<Account>,
 }
 
@@ -33,6 +35,10 @@ pub struct Account {
 /// Provides the Java-compatible default for `sslEnabled` when the YAML omits it.
 fn default_ssl_enabled() -> bool {
     true
+}
+
+fn default_parse_ia_folder() -> String {
+    "parse-ai".to_string()
 }
 
 /// Loads the YAML configuration from the explicit CLI path or the default\n/// `./config.yml`, preserving the same external behavior as the Java program.

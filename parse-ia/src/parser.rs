@@ -1,0 +1,478 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
+use log::{info, warn};
+use mailparse::{DispositionType, MailHeaderMap, ParsedMail};
+use regex::Regex;
+use serde::Serialize;
+
+use crate::metadata::embed_custom_metadata;
+use crate::utils::{
+    file_stem_or_name, make_unique_path, normalize_display_name, sanitize_filename,
+};
+
+const EMBEDDED_IMAGE_MAX_BYTES: usize = 30 * 1024;
+
+#[derive(Debug)]
+pub struct BackupParser {
+    account_folder: PathBuf,
+    parse_folder: PathBuf,
+}
+
+#[derive(Debug, Serialize)]
+struct ParsedEmailRecord {
+    parsing_folder: String,
+    email_folder: String,
+    email_file_name: String,
+    message_id: Option<String>,
+    subject: String,
+    expedition_date: Option<String>,
+    author: HeaderContact,
+    targets: Vec<HeaderContact>,
+    cc: Vec<HeaderContact>,
+    bcc: Vec<HeaderContact>,
+    attachments: Vec<AttachmentRecord>,
+}
+
+#[derive(Debug, Serialize)]
+struct HeaderContact {
+    raw: String,
+    name: Option<String>,
+    address: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AttachmentRecord {
+    original_name: String,
+    mime_type: String,
+    size: usize,
+}
+
+#[derive(Debug)]
+struct ExtractedAttachment {
+    path: PathBuf,
+    record: AttachmentRecord,
+}
+
+impl BackupParser {
+    pub fn new(email_folder: &str, parse_ia_folder: &str, account_name: &str) -> Self {
+        let account_folder = Path::new(email_folder).join(account_name);
+        let parse_folder = account_folder.join(parse_ia_folder);
+        Self {
+            account_folder,
+            parse_folder,
+        }
+    }
+
+    pub fn parse_account_backup(&self) -> Result<()> {
+        if !self.account_folder.exists() {
+            warn!(
+                "💣 Account folder missing, skipped: {}",
+                self.account_folder.display()
+            );
+            return Ok(());
+        }
+
+        fs::create_dir_all(&self.parse_folder)
+            .with_context(|| format!("unable to create {}", self.parse_folder.display()))?;
+
+        info!("🚀 Parse backup folder [{}]", self.account_folder.display());
+        self.walk_folder(&self.account_folder)?;
+        info!("🏁 Parse backup folder [{}]", self.account_folder.display());
+        Ok(())
+    }
+
+    fn walk_folder(&self, folder: &Path) -> Result<()> {
+        for entry in
+            fs::read_dir(folder).with_context(|| format!("unable to read {}", folder.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+
+            if path == self.parse_folder {
+                continue;
+            }
+
+            if path.is_dir() {
+                self.walk_folder(&path)?;
+                continue;
+            }
+
+            let is_eml = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| value.eq_ignore_ascii_case("eml"))
+                .unwrap_or(false);
+            if is_eml {
+                self.parse_email(&path);
+            }
+        }
+        Ok(())
+    }
+
+    fn parse_email(&self, email_path: &Path) {
+        if let Err(error) = self.parse_email_inner(email_path) {
+            warn!(
+                "💣 Parse email failed [{}]: {error:#}",
+                email_path.display()
+            );
+        }
+    }
+
+    fn parse_email_inner(&self, email_path: &Path) -> Result<()> {
+        info!("😎 Parse email [{}]", email_path.display());
+
+        let relative_email_path =
+            email_path
+                .strip_prefix(&self.account_folder)
+                .with_context(|| {
+                    format!(
+                        "unable to compute relative path for {}",
+                        email_path.display()
+                    )
+                })?;
+
+        let relative_parent = relative_email_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""));
+        let email_stem = file_stem_or_name(email_path);
+        let parsing_folder_name = folder_name_or_default(relative_parent, "");
+        let email_output_folder = self.parse_folder.join(relative_parent).join(&email_stem);
+        if email_output_folder.exists() {
+            info!(
+                "😎 Skip email already parsed [{}]",
+                email_output_folder.display()
+            );
+            return Ok(());
+        }
+        let parse_result = (|| -> Result<()> {
+            let raw = fs::read(email_path)
+                .with_context(|| format!("unable to read {}", email_path.display()))?;
+            let parsed = mailparse::parse_mail(&raw)
+                .with_context(|| format!("unable to parse {}", email_path.display()))?;
+
+            fs::create_dir_all(&email_output_folder)
+                .with_context(|| format!("unable to create {}", email_output_folder.display()))?;
+
+            let attachments = self.extract_attachments(&parsed, &email_output_folder)?;
+            let record = ParsedEmailRecord {
+                parsing_folder: parsing_folder_name,
+                email_folder: email_stem.clone(),
+                email_file_name: email_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                message_id: first_header(&parsed, "Message-ID"),
+                subject: normalize_subject(first_header(&parsed, "Subject").unwrap_or_default()),
+                expedition_date: parse_iso_timestamp(first_header(&parsed, "Date")),
+                author: parse_single_contact(first_header(&parsed, "From")),
+                targets: parse_contact_list(first_header(&parsed, "To")),
+                cc: parse_contact_list(first_header(&parsed, "Cc")),
+                bcc: parse_contact_list(first_header(&parsed, "Bcc")),
+                attachments: attachments
+                    .iter()
+                    .map(|attachment| AttachmentRecord {
+                        original_name: attachment.record.original_name.clone(),
+                        mime_type: attachment.record.mime_type.clone(),
+                        size: attachment.record.size,
+                    })
+                    .collect(),
+            };
+
+            let payload = serde_json::to_string_pretty(&record)?;
+            let json_path = email_output_folder.join(format!("{}.json", email_stem));
+            fs::write(&json_path, payload)
+                .with_context(|| format!("unable to write {}", json_path.display()))?;
+            self.embed_metadata_into_attachments(&attachments, &json_path)?;
+
+            Ok(())
+        })();
+
+        if let Err(error) = parse_result {
+            self.cleanup_failed_email_folder(&email_output_folder);
+            return Err(error);
+        }
+
+        Ok(())
+    }
+
+    fn extract_attachments(
+        &self,
+        parsed: &ParsedMail<'_>,
+        attachments_folder: &Path,
+    ) -> Result<Vec<ExtractedAttachment>> {
+        let mut attachments = Vec::new();
+        self.collect_attachments(parsed, attachments_folder, &mut attachments)?;
+        Ok(attachments)
+    }
+
+    fn collect_attachments(
+        &self,
+        part: &ParsedMail<'_>,
+        attachments_folder: &Path,
+        attachments: &mut Vec<ExtractedAttachment>,
+    ) -> Result<()> {
+        if part.subparts.is_empty() {
+            if let Some(file_name) = attachment_name(part) {
+                let bytes = part.get_body_raw()?;
+                if should_skip_embedded_image(part, bytes.len()) {
+                    info!("😎 Skip embedded image [{}]", file_name);
+                    return Ok(());
+                }
+
+                fs::create_dir_all(attachments_folder).with_context(|| {
+                    format!("unable to create {}", attachments_folder.display())
+                })?;
+                let safe_name = sanitize_filename(&file_name);
+                let final_name = if safe_name.is_empty() {
+                    "attachment.bin".to_string()
+                } else {
+                    safe_name
+                };
+                let target_path = make_unique_path(attachments_folder.join(final_name));
+                fs::write(&target_path, &bytes)
+                    .with_context(|| format!("unable to write {}", target_path.display()))?;
+
+                attachments.push(ExtractedAttachment {
+                    path: target_path.clone(),
+                    record: AttachmentRecord {
+                        original_name: target_path
+                            .file_name()
+                            .and_then(|value| value.to_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        mime_type: part.ctype.mimetype.clone(),
+                        size: bytes.len(),
+                    },
+                });
+            }
+            return Ok(());
+        }
+
+        for subpart in &part.subparts {
+            self.collect_attachments(subpart, attachments_folder, attachments)?;
+        }
+
+        Ok(())
+    }
+
+    fn embed_metadata_into_attachments(
+        &self,
+        attachments: &[ExtractedAttachment],
+        json_path: &Path,
+    ) -> Result<()> {
+        let payload = fs::read_to_string(json_path)
+            .with_context(|| format!("unable to read {}", json_path.display()))?;
+
+        for attachment in attachments {
+            if attachment.path.is_file() {
+                embed_custom_metadata(&attachment.path, &payload).with_context(|| {
+                    format!(
+                        "unable to inject doka metadata into {}",
+                        attachment.path.display()
+                    )
+                })?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn cleanup_failed_email_folder(&self, email_output_folder: &Path) {
+        if !email_output_folder.exists() {
+            return;
+        }
+
+        match fs::remove_dir_all(email_output_folder) {
+            Ok(()) => info!(
+                "😎 Cleanup failed email folder [{}]",
+                email_output_folder.display()
+            ),
+            Err(error) => warn!(
+                "💣 Unable to cleanup failed email folder [{}]: {error:#}",
+                email_output_folder.display()
+            ),
+        }
+    }
+}
+
+fn first_header(parsed: &ParsedMail<'_>, header: &str) -> Option<String> {
+    parsed
+        .headers
+        .get_first_value(header)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn parse_single_contact(raw: Option<String>) -> HeaderContact {
+    match raw {
+        Some(raw) => parse_address(&raw),
+        None => HeaderContact {
+            raw: String::new(),
+            name: None,
+            address: None,
+        },
+    }
+}
+
+fn parse_contact_list(raw: Option<String>) -> Vec<HeaderContact> {
+    raw.map(|value| {
+        mailparse::addrparse(&value)
+            .map(|addresses| {
+                addresses
+                    .iter()
+                    .filter_map(|address| match address {
+                        mailparse::MailAddr::Single(info) => Some(HeaderContact {
+                            raw: format_address(info.display_name.as_deref(), &info.addr),
+                            name: info
+                                .display_name
+                                .as_deref()
+                                .map(normalize_display_name)
+                                .filter(|value| !value.is_empty()),
+                            address: Some(info.addr.clone()),
+                        }),
+                        mailparse::MailAddr::Group(group) => {
+                            let raw = format!(
+                                "{}: {}",
+                                group.group_name,
+                                group
+                                    .addrs
+                                    .iter()
+                                    .map(|info| {
+                                        format_address(info.display_name.as_deref(), &info.addr)
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            );
+                            Some(HeaderContact {
+                                raw,
+                                name: Some(group.group_name.clone()),
+                                address: None,
+                            })
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|_| vec![fallback_contact(&value)])
+    })
+    .unwrap_or_default()
+}
+
+fn parse_address(raw: &str) -> HeaderContact {
+    parse_contact_list(Some(raw.to_string()))
+        .into_iter()
+        .next()
+        .unwrap_or(HeaderContact {
+            raw: raw.trim().to_string(),
+            name: raw
+                .trim()
+                .split_once('@')
+                .map(|_| normalize_display_name(raw.trim()))
+                .filter(|value| !value.is_empty()),
+            address: raw
+                .trim()
+                .split_once('@')
+                .map(|_| raw.trim().to_lowercase())
+                .filter(|value| !value.is_empty()),
+        })
+}
+
+fn fallback_contact(raw: &str) -> HeaderContact {
+    HeaderContact {
+        raw: raw.trim().to_string(),
+        name: None,
+        address: None,
+    }
+}
+
+fn format_address(display_name: Option<&str>, address: &str) -> String {
+    let display_name = display_name
+        .map(normalize_display_name)
+        .filter(|value| !value.is_empty());
+    match display_name {
+        Some(display_name) => format!("{} <{}>", display_name, address),
+        None => address.to_string(),
+    }
+}
+
+fn attachment_name(part: &ParsedMail<'_>) -> Option<String> {
+    let disposition = part.get_content_disposition();
+    disposition
+        .params
+        .get("filename")
+        .cloned()
+        .or_else(|| part.ctype.params.get("name").cloned())
+        .map(|value| normalize_display_name(value.trim_matches('"')))
+        .filter(|value| !value.is_empty())
+}
+
+fn should_skip_embedded_image(part: &ParsedMail<'_>, size: usize) -> bool {
+    let file_name = attachment_name(part);
+    let is_image = part.ctype.mimetype.starts_with("image/");
+    let disposition = part.get_content_disposition();
+    let is_inline = matches!(disposition.disposition, DispositionType::Inline);
+    let has_content_id = part.headers.get_first_value("Content-ID").is_some();
+    let is_small = size <= EMBEDDED_IMAGE_MAX_BYTES;
+    let looks_like_temp_asset = file_name
+        .as_deref()
+        .map(looks_like_embedded_temp_file)
+        .unwrap_or(false);
+
+    if !is_image && !looks_like_temp_asset {
+        return false;
+    }
+
+    is_inline || has_content_id || is_small || looks_like_temp_asset
+}
+
+fn looks_like_embedded_temp_file(file_name: &str) -> bool {
+    let lower = file_name.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+
+    let has_temp_prefix = lower.starts_with("tmp")
+        || lower.starts_with("image")
+        || lower.starts_with("part")
+        || lower.starts_with("att")
+        || lower.starts_with("inline");
+    let has_temp_marker = lower.contains(".tmp")
+        || lower.contains("unnamed")
+        || lower.contains("unknown")
+        || lower.contains("noname");
+    let has_weird_numeric_suffix = Regex::new(r"\.(tmp|dat|bin)\.\d+$")
+        .expect("invalid regex")
+        .is_match(&lower);
+    let has_embedded_image_name = Regex::new(r"^(tmp[0-9a-f]+|image\d+|part\d+(\.\d+)*|att\d+)")
+        .expect("invalid regex")
+        .is_match(&lower);
+
+    has_temp_prefix || has_temp_marker || has_weird_numeric_suffix || has_embedded_image_name
+}
+
+fn folder_name_or_default(path: &Path, fallback: &str) -> String {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn normalize_subject(subject: String) -> String {
+    let trimmed = subject.trim();
+    trimmed
+        .strip_prefix("🔴 ")
+        .or_else(|| trimmed.strip_prefix("🔵 "))
+        .unwrap_or(trimmed)
+        .trim()
+        .to_string()
+}
+
+fn parse_iso_timestamp(raw: Option<String>) -> Option<String> {
+    let raw = raw?;
+    let timestamp = mailparse::dateparse(&raw).ok()?;
+    let datetime = DateTime::<Utc>::from_timestamp(timestamp, 0)?;
+    Some(datetime.to_rfc3339())
+}

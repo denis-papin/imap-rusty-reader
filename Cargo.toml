@@ -1,9 +1,13 @@
-[package]
-name = "imap-rusty-reader"
+[workspace]
+members = ["imap-rusty-reader", "parse-ia"]
+default-members = ["imap-rusty-reader", "parse-ia"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[workspace.dependencies]
 anyhow = "1"
 async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
 chrono = { version = "0.4", default-features = true }

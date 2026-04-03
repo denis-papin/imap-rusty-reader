@@ -47,6 +47,7 @@ impl ImapSession {
 
 pub struct MailReader {
     base_folder: PathBuf,
+    parse_ia_folder: String,
     sub_folder: String,
     hostname: String,
     login: String,
@@ -66,6 +67,7 @@ impl MailReader {
     pub fn new(config: &Config, account: &Account, index_store: &IndexStore) -> Self {
         Self {
             base_folder: PathBuf::from(&config.email_folder),
+            parse_ia_folder: config.parse_ia_folder.clone(),
             sub_folder: account.name.clone(),
             hostname: account.server.clone(),
             login: account.login.clone(),
@@ -374,6 +376,9 @@ impl MailReader {
             let entry = entry?;
             let path = entry.path();
             if path.is_dir() {
+                if self.should_skip_index_folder(&path) {
+                    continue;
+                }
                 if self.group {
                     self.index_folder(&path);
                 }
@@ -383,6 +388,16 @@ impl MailReader {
             }
         }
         Ok(())
+    }
+
+    /// Skips parse-IA output directories so generated artifacts are never treated
+    /// as source `.eml` mail folders during index reconstruction.
+    fn should_skip_index_folder(&self, folder: &Path) -> bool {
+        folder
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name == self.parse_ia_folder)
+            .unwrap_or(false)
     }
 
     /// Learns a contact display name from an existing grouped folder on disk when\n    /// the folder name embeds an email address.

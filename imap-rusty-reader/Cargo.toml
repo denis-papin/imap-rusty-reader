@@ -1,0 +1,22 @@
+[package]
+name = "imap-rusty-reader"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-imap.workspace = true
+chrono.workspace = true
+env_logger.workspace = true
+filetime.workspace = true
+futures-util.workspace = true
+html-escape.workspace = true
+log.workspace = true
+mailparse.workspace = true
+quoted_printable.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tokio.workspace = true
+tokio-native-tls.workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "parse-ia"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+env_logger.workspace = true
+html-escape.workspace = true
+img-parts = "0.4"
+log.workspace = true
+lopdf = "0.40"
+lofty = "0.23"
+mailparse.workspace = true
+quoted_printable.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+zip = "2.4"

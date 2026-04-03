@@ -1,4 +1,8 @@
-# imap-rusty-reader
+# imap-rusty-reader workspace
+
+Ce dépôt est maintenant un workspace Cargo avec deux programmes :
+- `imap-rusty-reader` : lit un ou plusieurs comptes IMAP et sauvegarde les emails au format `.eml`
+- `parse-ia` : relit les `.eml` déjà sauvegardés, extrait les métadonnées et les pièces jointes dans un dossier configuré par `parseIaFolder`
 
 `imap-rusty-reader` est une réécriture Rust moderne du projet Java `imap-reader`.
 
@@ -61,14 +65,14 @@ accounts:
 ## Utilisation
 ### Lancer avec le fichier par défaut
 ```bash
-cargo run
+cargo run -p imap-rusty-reader
 ```
 
 Le programme lit alors `./config.yml`.
 
 ### Lancer avec un chemin explicite
 ```bash
-cargo run -- /chemin/vers/config.yml
+cargo run -p imap-rusty-reader -- /chemin/vers/config.yml
 ```
 
 ### Construire le binaire release
@@ -78,6 +82,37 @@ cargo build --release
 
 Le binaire sera disponible dans :
 `target/release/imap-rusty-reader`
+
+## Programme parse-ia
+`parse-ia` réutilise le même `config.yml` que `imap-rusty-reader`.
+
+Il parcourt les emails déjà présents dans `emailFolder/<account.name>/`, lit chaque fichier `.eml`, puis génère un dossier par email sous `parseIaFolder`.
+
+Dans ce dossier par email, on retrouve :
+- un fichier JSON avec les métadonnées extraites
+- les pièces jointes extraites, en conservant leur nom d’origine
+
+Exemple avec `parseIaFolder: _parse-ai` pour un compte `Denis 1` :
+- `Denis 1/_parse-ai/Contact/Mon email/Mon email.json`
+- `Denis 1/_parse-ai/Contact/Mon email/contrat.pdf`
+
+Le JSON contient notamment :
+- le nom du dossier de parsing et le nom du dossier dédié à l’email
+- l’auteur
+- les destinataires
+- la date d’expédition au format ISO
+- le sujet
+- la liste des pièces jointes avec leur nom d’origine
+
+### Lancer parse-ia
+```bash
+cargo run -p parse-ia
+```
+
+Avec un fichier explicite :
+```bash
+cargo run -p parse-ia -- /chemin/vers/config.yml
+```
 
 ## Arborescence de sortie
 Le dossier cible reste organisé comme dans le projet Java :
@@ -135,11 +170,13 @@ cargo test
 - le format YAML reste compatible, mais le code Rust n’utilise pas exactement la même structure interne que la version Java
 
 ## Fichiers importants
-- `src/main.rs` : point d’entrée
-- `src/config.rs` : chargement de la configuration YAML
-- `src/mail_reader.rs` : logique IMAP et sauvegarde des messages
-- `src/index_store.rs` : index JSON des `Message-ID`
-- `src/utils.rs` : normalisation des noms, décodage MIME, réparation du mojibake
+- `imap-rusty-reader/src/main.rs` : point d’entrée
+- `imap-rusty-reader/src/config.rs` : chargement de la configuration YAML
+- `imap-rusty-reader/src/mail_reader.rs` : logique IMAP et sauvegarde des messages
+- `imap-rusty-reader/src/index_store.rs` : index JSON des `Message-ID`
+- `imap-rusty-reader/src/utils.rs` : normalisation des noms, décodage MIME, réparation du mojibake
+- `parse-ia/src/main.rs` : point d’entrée du parseur offline
+- `parse-ia/src/parser.rs` : lecture récursive des `.eml`, écriture des JSON et extraction des pièces jointes
 
 ## Documentation complémentaire
 Voir aussi :
