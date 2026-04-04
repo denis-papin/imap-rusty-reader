@@ -1,0 +1,24 @@
+[package]
+name = "dropbox-filer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+arrow-array = "57"
+arrow-schema = "57"
+chrono.workspace = true
+clap.workspace = true
+datafusion = { version = "52", default-features = false, features = ["parquet", "sql"] }
+env_logger.workspace = true
+html-escape.workspace = true
+log.workspace = true
+parquet = "57"
+regex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tempfile = "3"
+tokio.workspace = true
+walkdir.workspace = true

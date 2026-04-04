@@ -1,9 +1,12 @@
 # imap-rusty-reader workspace
 
-Ce dépôt est maintenant un workspace Cargo avec trois programmes :
+## 🐍 Cobra
+
+Ce dépôt est maintenant un workspace Cargo avec quatre programmes :
 - `imap-rusty-reader` : lit un ou plusieurs comptes IMAP et sauvegarde les emails au format `.eml`
 - `parse-ia` : relit les `.eml` déjà sauvegardés, extrait les métadonnées et les pièces jointes dans un dossier configuré par `parseIaFolder`
 - `ai-enrich` : relit les dossiers produits par `parse-ia`, appelle OpenAI et écrit un JSON enrichi conforme à un schéma défini par `AGENTS.md`
+- `dropbox-filer` : relit les dossiers produits par `parse-ia` et `ai-enrich`, puis range les pièces jointes dans Dropbox selon `main_folder`, `sub_folder` et `proposed_file_name`
 
 `imap-rusty-reader` est une réécriture Rust moderne du projet Java `imap-reader`.
 
@@ -32,6 +35,12 @@ Exemple :
 
 ```yaml
 emailFolder: /mnt/backup/EMAILS_FOLDER
+parseIaFolder: _parse-ai
+aiEnabled: true
+aiModel: gpt-4o-mini
+aiAgentsFile: ./AGENTS.md
+aiOutputSuffix: .ai.json
+dropboxRootFolder: COBRA_TEST
 
 accounts:
   -
@@ -64,6 +73,15 @@ accounts:
 - `aiTimeoutSeconds` : timeout HTTP pour un appel OpenAI
 - `aiRequestDelayMs` : délai minimal en millisecondes entre deux appels OpenAI successifs
 - `aiPromptCachePrefix` : préfixe stable utilisé pour favoriser le prompt caching OpenAI sur le bloc d’instructions dérivé de `AGENTS.md`
+- `dropboxRootFolder` : dossier racine cible dans Dropbox pour `dropbox-filer`
+- `dropboxAccessToken` : token d’accès Dropbox déjà prêt, en alternative aux variables d’environnement
+- `dropboxAppKey` : app key Dropbox, utilisable avec `dropboxAppSecret` et `dropboxRefreshToken`
+- `dropboxAppSecret` : app secret Dropbox, utilisable avec `dropboxAppKey` et `dropboxRefreshToken`
+- `dropboxRefreshToken` : refresh token Dropbox pour obtenir un access token court avant l’upload
+- `dropboxTimeoutSeconds` : timeout HTTP pour un appel Dropbox
+- `dropboxOauthTokenUrl` : URL du endpoint OAuth `/oauth2/token`, utile surtout pour tests ou proxy
+- `dropboxApiBaseUrl` : URL de base API JSON Dropbox, utile surtout pour tests ou proxy
+- `dropboxContentBaseUrl` : URL de base API contenu Dropbox, utile surtout pour tests ou proxy
 - `accounts` : liste des comptes IMAP à traiter
 - `name` : nom du compte, utilisé comme sous-dossier principal
 - `group` : si `true`, les emails sont rangés par contact ; sinon ils sont rangés par dossier IMAP
@@ -213,6 +231,58 @@ Le code réinjecte automatiquement les valeurs autorisées dans `main_folder` et
 
 Un exemple complet est fourni dans :
 - `docs/AI_ENRICH_AGENTS.example.md`
+
+## Programme dropbox-filer
+`dropbox-filer` réutilise le même `config.yml` et parcourt les dossiers déjà produits par `parse-ia` et enrichis par `ai-enrich`.
+
+Pour chaque dossier email contenant :
+- `<email>.json`
+- `<email>.ai.json`
+- les pièces jointes extraites
+
+il :
+- associe chaque pièce jointe locale à son entrée `attachment_summaries`
+- utilise `main_folder` et `sub_folder` comme sous-dossiers Dropbox
+- ajoute un sous-dossier annuel `YYYY`, déduit en priorité de la date présente dans `proposed_file_name`, puis de la date de l’email en secours
+- renomme le fichier avec `proposed_file_name`
+- réapplique l’extension d’origine si besoin
+- crée les dossiers distants manquants via l’API Dropbox
+- uploade le fichier sans supprimer la copie locale
+
+Le programme écrit aussi :
+- `dropbox_uploads.parquet` à la racine de `emailFolder` : table Parquet consultable par DataFusion, contenant les fichiers envoyés avec leur MD5, leur nom final, leurs tags, le contenu XML et le contenu `ai.json`
+- `<email>.dropbox.error.json` : diagnostic si le rangement Dropbox échoue
+
+Par défaut :
+- l’auth Dropbox peut utiliser soit `DROPBOX_ACCESS_TOKEN`, soit `DROPBOX_APP_KEY` + `DROPBOX_APP_SECRET` + `DROPBOX_REFRESH_TOKEN`
+- la racine Dropbox est lue depuis `dropboxRootFolder`
+- un `--root` peut surcharger cette racine au lancement
+- avant chaque upload, `dropbox-filer` vérifie la table Parquet par MD5
+- si le MD5 existe déjà dans la table, `dropbox-filer` vérifie d’abord que le fichier est toujours présent sur Dropbox avant de le sauter
+- le chemin cible suit la forme `/<racine>/<main_folder>/<sub_folder>/<YYYY>/<proposed_file_name>`
+- le programme échoue si `ai-enrich` n’a pas produit une suggestion de nom pour chaque pièce jointe présente
+- `dropbox-filer` rafraîchit un access token court au démarrage quand il reçoit app key + app secret + refresh token
+
+### Lancer dropbox-filer
+```bash
+DROPBOX_ACCESS_TOKEN=... cargo run -p dropbox-filer -- /chemin/vers/config.yml
+```
+
+Ou avec app key / app secret / refresh token :
+```bash
+DROPBOX_APP_KEY=... \
+DROPBOX_APP_SECRET=... \
+DROPBOX_REFRESH_TOKEN=... \
+cargo run -p dropbox-filer -- /chemin/vers/config.yml
+```
+
+Avec des options utiles :
+```bash
+DROPBOX_ACCESS_TOKEN=... cargo run -p dropbox-filer -- /chemin/vers/config.yml --account "Denis 1 Fastmail"
+DROPBOX_ACCESS_TOKEN=... cargo run -p dropbox-filer -- /chemin/vers/config.yml --root /Archives/Emails
+DROPBOX_ACCESS_TOKEN=... cargo run -p dropbox-filer -- /chemin/vers/config.yml --force
+DROPBOX_ACCESS_TOKEN=... cargo run -p dropbox-filer -- /chemin/vers/config.yml --dry-run
+```
 
 ## Arborescence de sortie
 Le dossier cible reste organisé comme dans le projet Java :

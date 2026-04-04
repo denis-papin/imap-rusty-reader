@@ -1,6 +1,6 @@
 [workspace]
-members = ["imap-rusty-reader", "parse-ia", "ai-enrich"]
-default-members = ["imap-rusty-reader", "parse-ia", "ai-enrich"]
+members = ["imap-rusty-reader", "parse-ia", "ai-enrich", "dropbox-filer"]
+default-members = ["imap-rusty-reader", "parse-ia", "ai-enrich", "dropbox-filer"]
 resolver = "3"
 
 [workspace.package]

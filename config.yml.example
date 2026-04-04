@@ -1,0 +1,22 @@
+emailFolder: /mnt/backup/EMAILS_FOLDER
+parseIaFolder: _parse-ai
+aiEnabled: true
+aiModel: gpt-4o-mini
+aiAgentsFile: ./AGENTS.md
+aiOutputSuffix: .ai.json
+dropboxRootFolder: COBRA_TEST
+
+accounts:
+  -
+    name: Gestion Fastmail
+    group: true
+    recover: false
+    login: gestion@example.com
+    password: secret
+    server: imap.example.com
+    port: 993
+    sslEnabled: true
+    imapOutFolder:
+      - Sent
+    imapInFolder:
+      - INBOX
