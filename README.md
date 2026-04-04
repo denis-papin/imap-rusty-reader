@@ -1,8 +1,9 @@
 # imap-rusty-reader workspace
 
-Ce dépôt est maintenant un workspace Cargo avec deux programmes :
+Ce dépôt est maintenant un workspace Cargo avec trois programmes :
 - `imap-rusty-reader` : lit un ou plusieurs comptes IMAP et sauvegarde les emails au format `.eml`
 - `parse-ia` : relit les `.eml` déjà sauvegardés, extrait les métadonnées et les pièces jointes dans un dossier configuré par `parseIaFolder`
+- `ai-enrich` : relit les dossiers produits par `parse-ia`, appelle OpenAI et écrit un JSON enrichi conforme à un schéma défini par `AGENTS.md`
 
 `imap-rusty-reader` est une réécriture Rust moderne du projet Java `imap-reader`.
 
@@ -50,6 +51,19 @@ accounts:
 
 ### Champs supportés
 - `emailFolder` : dossier racine de sauvegarde des emails
+- `parseIaFolder` : sous-dossier où `parse-ia` écrit les JSON/XML/pièces jointes ; par défaut `parse-ai`
+- `aiEnabled` : active ou désactive `ai-enrich` ; par défaut `false`
+- `aiModel` : modèle OpenAI utilisé par `ai-enrich` ; par défaut `gpt-4o-mini`
+- `aiAgentsFile` : chemin vers le fichier `AGENTS.md` utilisé pour piloter le schéma JSON et les règles métier
+- `aiOutputSuffix` : suffixe du fichier JSON enrichi ; par défaut `.ai.json`
+- `aiMaxAttachmentBytes` : taille maximale d’une pièce jointe envoyable au modèle
+- `aiMaxAttachmentsPerEmail` : nombre maximal de pièces jointes prises en compte par email
+- `aiSendRawPdf` : si `true`, `ai-enrich` peut uploader les PDF bruts vers OpenAI
+- `aiSendRawImages` : si `true`, `ai-enrich` peut uploader les images brutes vers OpenAI
+- `aiRetryCount` : nombre de retries API en cas d’échec temporaire
+- `aiTimeoutSeconds` : timeout HTTP pour un appel OpenAI
+- `aiRequestDelayMs` : délai minimal en millisecondes entre deux appels OpenAI successifs
+- `aiPromptCachePrefix` : préfixe stable utilisé pour favoriser le prompt caching OpenAI sur le bloc d’instructions dérivé de `AGENTS.md`
 - `accounts` : liste des comptes IMAP à traiter
 - `name` : nom du compte, utilisé comme sous-dossier principal
 - `group` : si `true`, les emails sont rangés par contact ; sinon ils sont rangés par dossier IMAP
@@ -124,6 +138,53 @@ Avec un fichier explicite :
 cargo run -p parse-ia -- /chemin/vers/config.yml
 ```
 
+## Programme ai-enrich
+`ai-enrich` réutilise le même `config.yml` et parcourt les dossiers déjà produits par `parse-ia`.
+
+Pour chaque dossier email contenant :
+- `<email>.json`
+- `<email>.xml`
+- éventuellement des pièces jointes
+
+il appelle OpenAI via la Responses API et écrit :
+- `<email>.ai.json` : résultat structuré final
+- `<email>.ai.meta.json` : métadonnées d’exécution et hash d’entrée
+- `<email>.ai.error.json` : diagnostic si un email échoue
+
+Par défaut :
+- la clé API est lue depuis `OPENAI_API_KEY`
+- les pièces jointes texte sont injectées sous forme de texte
+- les PDF peuvent être uploadés bruts si `aiSendRawPdf: true`
+- les images brutes sont désactivées sauf si `aiSendRawImages: true`
+- la sortie IA recommande un classement hiérarchique avec `main_folder` puis `sub_folder`
+- `ai-enrich` envoie une `prompt_cache_key` stable pour favoriser le prompt caching sur les instructions communes
+
+### Lancer ai-enrich
+```bash
+OPENAI_API_KEY=... cargo run -p ai-enrich -- /chemin/vers/config.yml
+```
+
+Options utiles :
+```bash
+OPENAI_API_KEY=... cargo run -p ai-enrich -- /chemin/vers/config.yml --account "Denis 1 Fastmail"
+OPENAI_API_KEY=... cargo run -p ai-enrich -- /chemin/vers/config.yml --force
+OPENAI_API_KEY=... cargo run -p ai-enrich -- /chemin/vers/config.yml --dry-run
+OPENAI_API_KEY=... cargo run -p ai-enrich -- /chemin/vers/config.yml --agents /chemin/vers/AGENTS.md
+```
+
+### Format attendu pour AGENTS.md
+`ai-enrich` lit :
+- une section `Folder Taxonomy`
+- une section `Output JSON Schema`
+
+La section `Folder Taxonomy` doit contenir un objet JSON associant chaque dossier de niveau 1 à la liste de ses sous-dossiers autorisés.
+
+La section `Output JSON Schema` doit contenir un bloc JSON décrivant l’objet de sortie attendu.
+Le code réinjecte automatiquement les valeurs autorisées dans `main_folder` et `sub_folder`, puis vérifie que le sous-dossier choisi est compatible avec le dossier principal.
+
+Un exemple complet est fourni dans :
+- `docs/AI_ENRICH_AGENTS.example.md`
+
 ## Arborescence de sortie
 Le dossier cible reste organisé comme dans le projet Java :
 - un dossier racine défini par `emailFolder`
@@ -180,6 +241,10 @@ cargo test
 - le format YAML reste compatible, mais le code Rust n’utilise pas exactement la même structure interne que la version Java
 
 ## Fichiers importants
+- `ai-enrich/src/main.rs` : point d’entrée de l’enrichissement IA
+- `ai-enrich/src/agents.rs` : lecture de `AGENTS.md` et construction du schéma JSON strict
+- `ai-enrich/src/client.rs` : appels OpenAI Responses API et upload éventuel de fichiers
+- `ai-enrich/src/enrichment.rs` : scan des dossiers `parse-ia`, skip/idempotence, validation et écriture du résultat
 - `imap-rusty-reader/src/main.rs` : point d’entrée
 - `imap-rusty-reader/src/config.rs` : chargement de la configuration YAML
 - `imap-rusty-reader/src/mail_reader.rs` : logique IMAP et sauvegarde des messages
