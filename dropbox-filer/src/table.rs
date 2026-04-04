@@ -127,10 +127,10 @@ impl DropboxArchiveTable {
         self.md5_to_path
             .insert(record.md5.clone(), record.dropbox_path.clone());
         self.records.push(record);
-        self.persist()
+        Ok(())
     }
 
-    fn persist(&self) -> Result<()> {
+    pub fn persist(&self) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("unable to create {}", parent.display()))?;
@@ -529,6 +529,7 @@ mod tests {
                 attachment_mime_type: "application/pdf".to_string(),
             })
             .unwrap();
+        table.persist().unwrap();
 
         let reloaded = DropboxArchiveTable::load(dir.path()).await.unwrap();
         assert_eq!(reloaded.len(), 1);

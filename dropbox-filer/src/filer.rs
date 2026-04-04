@@ -135,6 +135,7 @@ impl DropboxFiler {
         }
 
         let mut processed = 0usize;
+        let mut archive_dirty = false;
         for job in jobs {
             if let Some(limit) = self.limit
                 && processed >= limit
@@ -143,10 +144,24 @@ impl DropboxFiler {
             }
             processed += 1;
 
-            if let Err(error) = self.process_job(&client, &mut archive, &job).await {
+            match self.process_job(&client, &mut archive, &job).await {
+                Ok(job_dirty) => {
+                    archive_dirty |= job_dirty;
+                }
+                Err(error) => {
                 warn!("💣 Dropbox filing failed [{}]: {error:#}", job.folder.display());
                 self.write_error_file(&job, &error)?;
+                }
             }
+        }
+
+        if !self.dry_run && archive_dirty {
+            archive.persist()?;
+            info!(
+                "😎 Persist Dropbox archive table [{}] rows={}",
+                archive.path().display(),
+                archive.len()
+            );
         }
 
         Ok(())
@@ -186,7 +201,7 @@ impl DropboxFiler {
         client: &DropboxClient,
         archive: &mut DropboxArchiveTable,
         job: &EmailJob,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let normalized_root = normalize_dropbox_root(&self.dropbox_root_folder)?;
         let parsed_payload = fs::read_to_string(&job.json_path)
             .with_context(|| format!("unable to read {}", job.json_path.display()))?;
@@ -203,10 +218,11 @@ impl DropboxFiler {
         if plans.is_empty() {
             info!("😎 No attachment to file [{}]", job.folder.display());
             remove_error_file(job)?;
-            return Ok(());
+            return Ok(false);
         }
 
         info!("📦 File attachments to Dropbox [{}]", job.folder.display());
+        let mut archive_dirty = false;
 
         for plan in plans {
             if archive.contains_md5(&plan.md5) {
@@ -258,6 +274,7 @@ impl DropboxFiler {
                 &ai,
                 &plan,
             )?)?;
+            archive_dirty = true;
             info!(
                 "😎 Uploaded [{}] -> [{}]",
                 plan.local_path.display(),
@@ -266,7 +283,7 @@ impl DropboxFiler {
         }
 
         remove_error_file(job)?;
-        Ok(())
+        Ok(archive_dirty)
     }
 
     fn write_error_file(&self, job: &EmailJob, error: &anyhow::Error) -> Result<()> {

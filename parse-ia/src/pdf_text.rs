@@ -1,8 +1,9 @@
 use std::fs;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use log::{info, warn};
 use tempfile::tempdir;
 
@@ -17,10 +18,17 @@ pub struct PdfTextExtraction {
 }
 
 pub fn extract_pdf_text(path: &Path) -> Result<Option<PdfTextExtraction>> {
-    if let Some(text) = extract_native_pdf_text(path)
-        .with_context(|| format!("unable to extract native PDF text {}", path.display()))?
-    {
-        return Ok(Some(finalize_extraction(text, "pdf_text")));
+    match extract_native_pdf_text(path) {
+        Ok(Some(text)) => {
+            return Ok(Some(finalize_extraction(text, "pdf_text")));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            warn!(
+                "💣 Native PDF text extraction failed [{}]: {error:#}; trying OCR fallback",
+                path.display()
+            );
+        }
     }
 
     if let Some(text) =
@@ -33,12 +41,36 @@ pub fn extract_pdf_text(path: &Path) -> Result<Option<PdfTextExtraction>> {
 }
 
 fn extract_native_pdf_text(path: &Path) -> Result<Option<String>> {
-    let extracted = pdf_extract::extract_text(path)?;
+    let extracted = catch_pdf_extract_panic(|| pdf_extract::extract_text(path))
+        .with_context(|| format!("native pdf-extract panicked for {}", path.display()))??;
     let normalized = normalize_text(&extracted);
     if normalized.is_empty() {
         Ok(None)
     } else {
         Ok(Some(normalized))
+    }
+}
+
+fn catch_pdf_extract_panic<F>(operation: F) -> Result<Result<String>>
+where
+    F: FnOnce() -> Result<String, pdf_extract::OutputError>,
+{
+    match catch_unwind(AssertUnwindSafe(operation)) {
+        Ok(result) => Ok(result.map_err(anyhow::Error::from)),
+        Err(payload) => Err(anyhow!(
+            "pdf-extract panic: {}",
+            panic_payload_message(payload)
+        )),
+    }
+}
+
+fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic payload".to_string()
     }
 }
 
@@ -160,5 +192,22 @@ fn finalize_extraction(text: String, method: &'static str) -> PdfTextExtraction 
         text,
         method,
         truncated,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+
+    use super::catch_pdf_extract_panic;
+
+    #[test]
+    fn converts_pdf_extract_panic_into_error() {
+        let result = catch_pdf_extract_panic(|| -> Result<String, pdf_extract::OutputError> {
+            panic!("not a number");
+        });
+
+        let error = result.expect_err("panic should become an error");
+        assert!(error.to_string().contains("pdf-extract panic: not a number"));
     }
 }
