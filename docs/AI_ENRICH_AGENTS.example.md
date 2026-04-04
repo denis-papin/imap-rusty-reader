@@ -18,6 +18,27 @@ Produire un dossier JSON compact, fiable et directement exploitable pour le clas
 
 - Resumer chaque piece jointe individuellement.
 - Si une piece jointe n'est pas lisible, l'indiquer clairement.
+- Renseigner `proposed_file_name` pour chaque piece jointe au format `yyyy-mm-dd <emetteur-short> <motif>`.
+- Conserver l'extension d'origine quand elle est connue.
+
+## Importance Rules
+
+Une entree importante est un email ou un document qui semble garder une valeur legale, contractuelle, comptable, probatoire ou operationnelle dans le temps.
+
+Exemples d'entrees importantes :
+- releve bancaire
+- contrat de travail
+- facture
+- document de chantier
+- email d'engagement
+
+Exemples d'entrees non importantes :
+- publicite
+- newsletter
+- email automatique routinier
+- communication sans consequence durable
+
+Utiliser uniquement `HAUTE` ou `BASSE`.
 
 ## Classification Rules
 
@@ -40,10 +61,14 @@ Produire un dossier JSON compact, fiable et directement exploitable pour le clas
 ```json
 {
   "type": "object",
-  "required": ["email_summary", "main_folder", "sub_folder", "attachment_summaries"],
+  "required": ["email_summary", "email_importance", "main_folder", "sub_folder", "attachment_summaries"],
   "properties": {
     "email_summary": {
       "type": "string"
+    },
+    "email_importance": {
+      "type": "string",
+      "enum": ["HAUTE", "BASSE"]
     },
     "main_folder": {
       "type": "string"
@@ -55,7 +80,7 @@ Produire un dossier JSON compact, fiable et directement exploitable pour le clas
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["file_name", "mime_type", "summary", "confidence"],
+        "required": ["file_name", "mime_type", "summary", "confidence", "importance", "proposed_file_name"],
         "properties": {
           "file_name": {
             "type": "string"
@@ -68,6 +93,13 @@ Produire un dossier JSON compact, fiable et directement exploitable pour le clas
           },
           "confidence": {
             "type": ["number", "null"]
+          },
+          "importance": {
+            "type": "string",
+            "enum": ["HAUTE", "BASSE"]
+          },
+          "proposed_file_name": {
+            "type": "string"
           }
         }
       }
@@ -81,6 +113,7 @@ Produire un dossier JSON compact, fiable et directement exploitable pour le clas
 ```json
 {
   "email_summary": "fin de contrat de travail",
+  "email_importance": "HAUTE",
   "main_folder": "TRAVAIL",
   "sub_folder": "LEGAL",
   "attachment_summaries": [
@@ -88,7 +121,9 @@ Produire un dossier JSON compact, fiable et directement exploitable pour le clas
       "file_name": "courrier.pdf",
       "mime_type": "application/pdf",
       "summary": "courrier relatif a la fin du contrat de travail",
-      "confidence": 0.92
+      "confidence": 0.92,
+      "importance": "HAUTE",
+      "proposed_file_name": "2024-03-15 techvalley fin-contrat.pdf"
     }
   ]
 }

@@ -58,7 +58,7 @@ accounts:
 - `aiOutputSuffix` : suffixe du fichier JSON enrichi ; par défaut `.ai.json`
 - `aiMaxAttachmentBytes` : taille maximale d’une pièce jointe envoyable au modèle
 - `aiMaxAttachmentsPerEmail` : nombre maximal de pièces jointes prises en compte par email
-- `aiSendRawPdf` : si `true`, `ai-enrich` peut uploader les PDF bruts vers OpenAI
+- `aiSendRawPdf` : option legacy, les PDF sont maintenant traités par `parse-ia` et ne sont plus uploadés bruts par `ai-enrich`
 - `aiSendRawImages` : si `true`, `ai-enrich` peut uploader les images brutes vers OpenAI
 - `aiRetryCount` : nombre de retries API en cas d’échec temporaire
 - `aiTimeoutSeconds` : timeout HTTP pour un appel OpenAI
@@ -119,6 +119,9 @@ Le JSON contient notamment :
 - la date d’expédition au format ISO
 - le sujet
 - la liste des pièces jointes avec leur nom d’origine
+- le hash `md5` de chaque pièce jointe
+- pour les PDF, un texte extrait quand il est disponible
+- pour les PDF image, une tentative d’OCR quand `pdftoppm` et `tesseract` sont disponibles sur la machine
 
 Le XML :
 - ignore les pièces jointes
@@ -138,6 +141,32 @@ Avec un fichier explicite :
 cargo run -p parse-ia -- /chemin/vers/config.yml
 ```
 
+### Installer l'OCR PDF sur Linux
+Pour permettre à `parse-ia` de faire un OCR des PDF image, il faut installer `pdftoppm` et `tesseract`.
+
+Sur Debian / Ubuntu :
+```bash
+sudo apt update
+sudo apt install poppler-utils tesseract-ocr tesseract-ocr-fra tesseract-ocr-eng
+```
+
+Sur Fedora :
+```bash
+sudo dnf install poppler-utils tesseract tesseract-langpack-fra tesseract-langpack-eng
+```
+
+Sur Arch Linux :
+```bash
+sudo pacman -S poppler tesseract tesseract-data-fra tesseract-data-eng
+```
+
+Vérification rapide :
+```bash
+pdftoppm -h
+tesseract --version
+tesseract --list-langs
+```
+
 ## Programme ai-enrich
 `ai-enrich` réutilise le même `config.yml` et parcourt les dossiers déjà produits par `parse-ia`.
 
@@ -154,7 +183,7 @@ il appelle OpenAI via la Responses API et écrit :
 Par défaut :
 - la clé API est lue depuis `OPENAI_API_KEY`
 - les pièces jointes texte sont injectées sous forme de texte
-- les PDF peuvent être uploadés bruts si `aiSendRawPdf: true`
+- les PDF sont extraits côté `parse-ia` et `ai-enrich` réutilise ce texte ; le PDF brut n’est plus envoyé à OpenAI
 - les images brutes sont désactivées sauf si `aiSendRawImages: true`
 - la sortie IA recommande un classement hiérarchique avec `main_folder` puis `sub_folder`
 - `ai-enrich` envoie une `prompt_cache_key` stable pour favoriser le prompt caching sur les instructions communes

@@ -11,6 +11,7 @@ use regex::Regex;
 use serde::Serialize;
 
 use crate::metadata::embed_custom_metadata;
+use crate::pdf_text::extract_pdf_text;
 use crate::utils::{
     file_stem_or_name, make_unique_path, normalize_display_name, sanitize_filename,
 };
@@ -51,6 +52,13 @@ struct AttachmentRecord {
     original_name: String,
     mime_type: String,
     size: usize,
+    md5: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extracted_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extracted_text_method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extracted_text_truncated: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -181,6 +189,10 @@ impl BackupParser {
                         original_name: attachment.record.original_name.clone(),
                         mime_type: attachment.record.mime_type.clone(),
                         size: attachment.record.size,
+                        md5: attachment.record.md5.clone(),
+                        extracted_text: attachment.record.extracted_text.clone(),
+                        extracted_text_method: attachment.record.extracted_text_method.clone(),
+                        extracted_text_truncated: attachment.record.extracted_text_truncated,
                     })
                     .collect(),
             };
@@ -242,15 +254,12 @@ impl BackupParser {
 
                 attachments.push(ExtractedAttachment {
                     path: target_path.clone(),
-                    record: AttachmentRecord {
-                        original_name: target_path
-                            .file_name()
-                            .and_then(|value| value.to_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        mime_type: part.ctype.mimetype.clone(),
-                        size: bytes.len(),
-                    },
+                    record: self.build_attachment_record(
+                        &target_path,
+                        bytes.len(),
+                        &part.ctype.mimetype,
+                        &bytes,
+                    ),
                 });
             }
             return Ok(());
@@ -261,6 +270,58 @@ impl BackupParser {
         }
 
         Ok(())
+    }
+
+    fn build_attachment_record(
+        &self,
+        path: &Path,
+        size: usize,
+        mime_type: &str,
+        bytes: &[u8],
+    ) -> AttachmentRecord {
+        let mut record = AttachmentRecord {
+            original_name: path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_string(),
+            mime_type: mime_type.to_string(),
+            size,
+            md5: format!("{:x}", md5::compute(bytes)),
+            extracted_text: None,
+            extracted_text_method: None,
+            extracted_text_truncated: None,
+        };
+
+        let is_pdf = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.eq_ignore_ascii_case("pdf"))
+            .unwrap_or(false);
+        if !is_pdf {
+            return record;
+        }
+
+        match extract_pdf_text(path) {
+            Ok(Some(extraction)) => {
+                info!(
+                    "😎 Extract PDF text [{}] via {}",
+                    path.display(),
+                    extraction.method
+                );
+                record.extracted_text = Some(extraction.text);
+                record.extracted_text_method = Some(extraction.method.to_string());
+                record.extracted_text_truncated = Some(extraction.truncated);
+            }
+            Ok(None) => {
+                info!("😎 No PDF text extracted [{}]", path.display());
+            }
+            Err(error) => {
+                warn!("💣 PDF text extraction failed [{}]: {error:#}", path.display());
+            }
+        }
+
+        record
     }
 
     fn embed_metadata_into_attachments(

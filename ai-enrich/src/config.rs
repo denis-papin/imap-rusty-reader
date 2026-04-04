@@ -38,6 +38,7 @@ pub struct Config {
         default = "default_ai_max_attachments_per_email"
     )]
     pub ai_max_attachments_per_email: usize,
+    #[allow(dead_code)]
     #[serde(rename = "aiSendRawPdf", default = "default_ai_send_raw_pdf")]
     pub ai_send_raw_pdf: bool,
     #[serde(rename = "aiSendRawImages", default = "default_ai_send_raw_images")]

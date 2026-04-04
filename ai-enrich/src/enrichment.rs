@@ -7,7 +7,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use jsonschema::validator_for;
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
@@ -51,6 +51,24 @@ struct AttachmentPromptInput {
     ingestion_mode: String,
     extracted_text: Option<String>,
     note: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ParsedEmailMetadata {
+    #[serde(default)]
+    attachments: Vec<ParsedAttachmentMetadata>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ParsedAttachmentMetadata {
+    original_name: String,
+    mime_type: String,
+    #[serde(default)]
+    extracted_text: Option<String>,
+    #[serde(default)]
+    extracted_text_method: Option<String>,
+    #[serde(default)]
+    extracted_text_truncated: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -162,7 +180,11 @@ impl EnrichmentRunner {
             .with_context(|| format!("unable to read {}", job.json_path.display()))?;
         let xml_payload = fs::read_to_string(&job.xml_path)
             .with_context(|| format!("unable to read {}", job.xml_path.display()))?;
-        let attachment_inputs = self.build_attachment_inputs(client, job).await?;
+        let parsed_metadata = serde_json::from_str::<ParsedEmailMetadata>(&json_payload)
+            .with_context(|| format!("unable to parse {}", job.json_path.display()))?;
+        let attachment_inputs = self
+            .build_attachment_inputs(client, job, &parsed_metadata)
+            .await?;
 
         let request = build_responses_request(
             &self.config.ai_model,
@@ -230,8 +252,14 @@ impl EnrichmentRunner {
         &self,
         client: &OpenAiClient,
         job: &EmailJob,
+        parsed_metadata: &ParsedEmailMetadata,
     ) -> Result<Vec<AttachmentSource>> {
         let mut items = Vec::new();
+        let attachment_lookup = parsed_metadata
+            .attachments
+            .iter()
+            .map(|attachment| (attachment.original_name.clone(), attachment.clone()))
+            .collect::<BTreeMap<_, _>>();
         for path in job
             .attachments
             .iter()
@@ -246,6 +274,7 @@ impl EnrichmentRunner {
                 .to_string();
             let mime_type = guess_mime_type(path);
             let size = metadata.len();
+            let extracted = attachment_lookup.get(&file_name);
 
             if size > self.config.ai_max_attachment_bytes as u64 {
                 items.push(AttachmentSource::PromptOnly(AttachmentPromptInput {
@@ -257,6 +286,30 @@ impl EnrichmentRunner {
                     note: Some(
                         "Attachment skipped because it exceeded aiMaxAttachmentBytes".to_string(),
                     ),
+                }));
+                continue;
+            }
+
+            if let Some(attachment) = extracted
+                && let Some(extracted_text) = attachment.extracted_text.as_ref()
+            {
+                let note = attachment_lookup.get(&file_name).and_then(|attachment| {
+                    let method = attachment.extracted_text_method.as_deref()?;
+                    Some(match attachment.extracted_text_truncated.unwrap_or(false) {
+                        true => format!(
+                            "Attachment text extracted via {} and truncated before AI enrichment",
+                            method
+                        ),
+                        false => format!("Attachment text extracted via {}", method),
+                    })
+                });
+                items.push(AttachmentSource::PromptOnly(AttachmentPromptInput {
+                    file_name,
+                    mime_type: attachment.mime_type.clone(),
+                    size,
+                    ingestion_mode: "pre_extracted_text".to_string(),
+                    extracted_text: Some(truncate_chars(extracted_text, ATTACHMENT_TEXT_MAX_CHARS)),
+                    note,
                 }));
                 continue;
             }
@@ -281,9 +334,7 @@ impl EnrichmentRunner {
                 .unwrap_or(false);
             let is_image = mime_type.starts_with("image/");
 
-            if (is_pdf && self.config.ai_send_raw_pdf)
-                || (is_image && self.config.ai_send_raw_images)
-            {
+            if is_image && self.config.ai_send_raw_images {
                 let uploaded = client.upload_file(path).await?;
                 items.push(AttachmentSource::PromptAndFile {
                     prompt: AttachmentPromptInput {
@@ -298,6 +349,21 @@ impl EnrichmentRunner {
                     },
                     file_id: uploaded.file_id,
                 });
+                continue;
+            }
+
+            if is_pdf {
+                items.push(AttachmentSource::PromptOnly(AttachmentPromptInput {
+                    file_name,
+                    mime_type,
+                    size,
+                    ingestion_mode: "metadata_only".to_string(),
+                    extracted_text: None,
+                    note: Some(
+                        "PDF not uploaded as raw file; AI enrichment relies on parse-ia extracted text when available"
+                            .to_string(),
+                    ),
+                }));
                 continue;
             }
 
@@ -482,6 +548,11 @@ fn build_instructions(agents: &AgentsSpec) -> String {
 Return only JSON matching the provided JSON Schema.\n\
 Choose exactly one `main_folder` and one `sub_folder` from the allowed taxonomy.\n\
 The `sub_folder` must be valid for the selected `main_folder`.\n\
+Set `email_importance` to either `HAUTE` or `BASSE`.\n\
+Set each attachment `importance` to either `HAUTE` or `BASSE`.\n\
+For each attachment, set `proposed_file_name` using the format `yyyy-mm-dd <emetteur-short> <motif>` and preserve the original file extension when known.\n\
+Use the email date for `yyyy-mm-dd` when available.\n\
+Use a short sender label for `<emetteur-short>` and a concise French reason for `<motif>`.\n\
 If evidence is insufficient, say so in the appropriate field and do not invent facts.\n\
 Write all free-text JSON values in French.\n\
 Specifically, `email_summary` and each attachment `summary` must be written in French.\n\
@@ -524,10 +595,22 @@ Attachment inputs:\n```json\n{}\n```\n",
 }
 
 fn compact_json_for_prompt(value: &str) -> String {
-    serde_json::from_str::<Value>(value)
-        .ok()
-        .and_then(|json| serde_json::to_string(&json).ok())
-        .unwrap_or_else(|| value.to_string())
+    let mut json = match serde_json::from_str::<Value>(value) {
+        Ok(json) => json,
+        Err(_) => return value.to_string(),
+    };
+
+    if let Some(attachments) = json.get_mut("attachments").and_then(Value::as_array_mut) {
+        for attachment in attachments {
+            if let Some(object) = attachment.as_object_mut() {
+                object.remove("extracted_text");
+                object.remove("extracted_text_method");
+                object.remove("extracted_text_truncated");
+            }
+        }
+    }
+
+    serde_json::to_string(&json).unwrap_or_else(|_| value.to_string())
 }
 
 fn build_prompt_cache_key(prompt_cache_prefix: &str, model: &str, agents: &AgentsSpec) -> String {

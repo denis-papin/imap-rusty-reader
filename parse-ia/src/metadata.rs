@@ -9,6 +9,7 @@ use img_parts::jpeg::{Jpeg, JpegSegment, markers};
 use img_parts::png::{Png, PngChunk};
 use img_parts::riff::{RiffChunk, RiffContent};
 use img_parts::webp::{CHUNK_VP8, CHUNK_VP8L, CHUNK_VP8X, CHUNK_XMP, WebP};
+use log::{info, warn};
 use lofty::config::WriteOptions;
 use lofty::file::{FileType, TaggedFileExt};
 use lofty::id3::v2::Id3v2Tag;
@@ -345,6 +346,10 @@ fn write_ffmpeg_metadata(path: &Path, payload: &str) -> Result<()> {
         .unwrap_or("media.bin");
     let temp_path = parent.join(format!(".{file_name}.doka-tmp"));
 
+    info!(
+        "🧰 Launch external tool [ffmpeg] for metadata injection [{}]",
+        path.display()
+    );
     let output = Command::new("ffmpeg")
         .arg("-v")
         .arg("error")
@@ -364,12 +369,22 @@ fn write_ffmpeg_metadata(path: &Path, payload: &str) -> Result<()> {
     if !output.status.success() {
         let _ = fs::remove_file(&temp_path);
         let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!(
+            "💣 External tool failed [ffmpeg] for metadata injection [{}] with status {}",
+            path.display(),
+            output.status
+        );
         anyhow::bail!(
             "ffmpeg metadata update failed for {}: {}",
             path.display(),
             stderr.trim()
         );
     }
+
+    info!(
+        "✅ External tool succeeded [ffmpeg] for metadata injection [{}]",
+        path.display()
+    );
 
     fs::rename(&temp_path, path)
         .with_context(|| format!("unable to replace {}", path.display()))?;

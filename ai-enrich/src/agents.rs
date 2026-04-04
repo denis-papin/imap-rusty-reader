@@ -7,6 +7,8 @@ use regex::Regex;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+const IMPORTANCE_VALUES: &[&str] = &["HAUTE", "BASSE"];
+
 #[derive(Debug, Clone)]
 pub struct AgentsSpec {
     pub instructions: String,
@@ -123,11 +125,16 @@ fn default_output_schema(folder_taxonomy: &BTreeMap<String, Vec<String>>) -> Val
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["email_summary", "main_folder", "sub_folder", "attachment_summaries"],
+        "required": ["email_summary", "email_importance", "main_folder", "sub_folder", "attachment_summaries"],
         "properties": {
             "email_summary": {
                 "type": "string",
                 "description": "A concise summary of the email in a few words."
+            },
+            "email_importance": {
+                "type": "string",
+                "enum": IMPORTANCE_VALUES,
+                "description": "Whether the email itself is important over time."
             },
             "main_folder": {
                 "type": "string",
@@ -144,12 +151,17 @@ fn default_output_schema(folder_taxonomy: &BTreeMap<String, Vec<String>>) -> Val
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["file_name", "mime_type", "summary", "confidence"],
+                    "required": ["file_name", "mime_type", "summary", "confidence", "importance", "proposed_file_name"],
                     "properties": {
                         "file_name": { "type": "string" },
                         "mime_type": { "type": ["string", "null"] },
                         "summary": { "type": "string" },
-                        "confidence": { "type": ["number", "null"] }
+                        "confidence": { "type": ["number", "null"] },
+                        "importance": { "type": "string", "enum": IMPORTANCE_VALUES },
+                        "proposed_file_name": {
+                            "type": "string",
+                            "description": "Suggested attachment filename using the format yyyy-mm-dd <emetteur-short> <motif> while preserving the original extension when known."
+                        }
                     }
                 }
             }
@@ -170,9 +182,21 @@ fn inject_folder_enums_and_harden(
             items.insert("enum".to_string(), json!(main_folders));
         }
     }
+    if let Some(email_importance) = schema.pointer_mut("/properties/email_importance") {
+        if let Some(items) = email_importance.as_object_mut() {
+            items.insert("enum".to_string(), json!(IMPORTANCE_VALUES));
+        }
+    }
     if let Some(sub_folder) = schema.pointer_mut("/properties/sub_folder") {
         if let Some(items) = sub_folder.as_object_mut() {
             items.insert("enum".to_string(), json!(sub_folders));
+        }
+    }
+    if let Some(attachment_importance) =
+        schema.pointer_mut("/properties/attachment_summaries/items/properties/importance")
+    {
+        if let Some(items) = attachment_importance.as_object_mut() {
+            items.insert("enum".to_string(), json!(IMPORTANCE_VALUES));
         }
     }
     schema
@@ -197,6 +221,7 @@ fn build_compact_instructions(
         "Output Rules",
         "Summary Rules",
         "Attachment Summary Rules",
+        "Importance Rules",
         "Classification Rules",
         "Failure And Uncertainty Rules",
     ] {
@@ -337,6 +362,7 @@ mod tests {
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
+                "email_importance": { "type": "string" },
                 "main_folder": { "type": "string" },
                 "sub_folder": { "type": "string" }
             }
@@ -351,6 +377,12 @@ mod tests {
         ]);
         let hardened = inject_folder_enums_and_harden(schema, &taxonomy);
         assert_eq!(
+            hardened
+                .pointer("/properties/email_importance/enum")
+                .unwrap(),
+            &serde_json::json!(["HAUTE", "BASSE"])
+        );
+        assert_eq!(
             hardened.pointer("/properties/main_folder/enum").unwrap(),
             &serde_json::json!(["DENIS", "TRAVAIL"])
         );
@@ -360,7 +392,7 @@ mod tests {
         );
         assert_eq!(
             hardened.get("required").unwrap(),
-            &serde_json::json!(["main_folder", "sub_folder"])
+            &serde_json::json!(["email_importance", "main_folder", "sub_folder"])
         );
     }
 
