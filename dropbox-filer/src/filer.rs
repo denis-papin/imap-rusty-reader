@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -10,13 +10,16 @@ use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use crate::config::Config;
-use crate::dropbox::DropboxClient;
+use crate::dropbox::{DropboxClient, DropboxRemoteFile};
 use crate::table::{ArchiveRecord, DropboxArchiveTable};
-use crate::utils::{build_dropbox_file_path, ensure_original_extension, normalize_dropbox_root};
+use crate::utils::{
+    build_dropbox_file_path, compute_dropbox_content_hash, compute_dropbox_content_hash_bytes,
+    ensure_original_extension, normalize_dropbox_root,
+};
 
 const LEGACY_META_SUFFIX: &str = ".dropbox.json";
 const ERROR_SUFFIX: &str = ".dropbox.error.json";
-const TABLE_LAYOUT_VERSION: &str = "3";
+const TABLE_LAYOUT_VERSION: &str = "4";
 
 #[derive(Debug, Clone)]
 pub struct DropboxFiler {
@@ -102,6 +105,9 @@ struct AttachmentUploadPlan {
     year_folder: String,
     final_file_name: String,
     dropbox_path: String,
+    xml_file_name: String,
+    xml_dropbox_path: String,
+    enriched_xml_content: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -110,8 +116,14 @@ struct ErrorFile {
     failed_at: String,
 }
 
+#[derive(Debug, Default, Clone)]
+struct DropboxRemoteIndex {
+    paths_by_content_hash: HashMap<String, Vec<String>>,
+}
+
 impl DropboxFiler {
     pub async fn run(&self) -> Result<()> {
+        let normalized_root = normalize_dropbox_root(&self.dropbox_root_folder)?;
         let client = DropboxClient::new(
             self.access_token.clone(),
             self.config.dropbox_api_base_url.as_deref(),
@@ -134,6 +146,14 @@ impl DropboxFiler {
             return Ok(());
         }
 
+        let remote_files = client.list_files_recursive(&normalized_root).await?;
+        let mut remote_index = DropboxRemoteIndex::from_remote_files(remote_files);
+        info!(
+            "😎 Dropbox remote index [{}] files={}",
+            normalized_root,
+            remote_index.len()
+        );
+
         let mut processed = 0usize;
         let mut archive_dirty = false;
         for job in jobs {
@@ -144,7 +164,10 @@ impl DropboxFiler {
             }
             processed += 1;
 
-            match self.process_job(&client, &mut archive, &job).await {
+            match self
+                .process_job(&client, &mut archive, &mut remote_index, &normalized_root, &job)
+                .await
+            {
                 Ok(job_dirty) => {
                     archive_dirty |= job_dirty;
                 }
@@ -200,12 +223,13 @@ impl DropboxFiler {
         &self,
         client: &DropboxClient,
         archive: &mut DropboxArchiveTable,
+        remote_index: &mut DropboxRemoteIndex,
+        normalized_root: &str,
         job: &EmailJob,
     ) -> Result<bool> {
-        let normalized_root = normalize_dropbox_root(&self.dropbox_root_folder)?;
         let parsed_payload = fs::read_to_string(&job.json_path)
             .with_context(|| format!("unable to read {}", job.json_path.display()))?;
-        let xml_payload = fs::read_to_string(&job.xml_path)
+        let source_xml_payload = fs::read_to_string(&job.xml_path)
             .with_context(|| format!("unable to read {}", job.xml_path.display()))?;
         let ai_payload = fs::read_to_string(&job.ai_path)
             .with_context(|| format!("unable to read {}", job.ai_path.display()))?;
@@ -213,7 +237,14 @@ impl DropboxFiler {
             .with_context(|| format!("unable to parse {}", job.json_path.display()))?;
         let ai = serde_json::from_str::<AiClassification>(&ai_payload)
             .with_context(|| format!("unable to parse {}", job.ai_path.display()))?;
-        let plans = build_upload_plans(&normalized_root, &job.attachments, &parsed, &ai)?;
+        let plans = build_upload_plans(
+            &normalized_root,
+            &job.attachments,
+            &parsed,
+            &ai,
+            &source_xml_payload,
+            &ai_payload,
+        )?;
 
         if plans.is_empty() {
             info!("😎 No attachment to file [{}]", job.folder.display());
@@ -225,36 +256,30 @@ impl DropboxFiler {
         let mut archive_dirty = false;
 
         for plan in plans {
+            let dropbox_content_hash = compute_dropbox_content_hash(&plan.local_path)?;
             if archive.contains_md5(&plan.md5) {
-                if let Some(existing_path) = archive.existing_path_for_md5(&plan.md5) {
-                    if client.file_exists(existing_path).await? {
-                        info!(
-                            "😎 Skip attachment already archived by MD5 [{}] -> [{}]",
-                            plan.local_path.display(),
-                            existing_path
-                        );
-                        continue;
-                    }
-
+                if let Some(existing_paths) = remote_index.paths_for_content_hash(&dropbox_content_hash) {
                     info!(
-                        "😎 MD5 already indexed but missing on Dropbox, re-upload [{}] -> [{}]",
+                        "😎 Skip attachment already archived by MD5 + checksum Dropbox [{}] -> [{}]",
                         plan.local_path.display(),
-                        plan.dropbox_path
+                        existing_paths[0]
                     );
-                } else {
-                    info!(
-                        "😎 MD5 already indexed without path, re-upload [{}] -> [{}]",
-                        plan.local_path.display(),
-                        plan.dropbox_path
-                    );
+                    continue;
                 }
+
+                info!(
+                    "😎 MD5 already indexed but no matching checksum found on Dropbox, re-upload [{}] -> [{}]",
+                    plan.local_path.display(),
+                    plan.dropbox_path
+                );
             }
 
             if self.dry_run {
                 info!(
-                    "😎 Dry run upload [{}] -> [{}]",
+                    "😎 Dry run upload [{}] -> [{}] and [{}]",
                     plan.local_path.display(),
-                    plan.dropbox_path
+                    plan.dropbox_path,
+                    plan.xml_dropbox_path
                 );
                 continue;
             }
@@ -264,21 +289,32 @@ impl DropboxFiler {
                 .upload_file(&plan.local_path, &plan.dropbox_path)
                 .await
                 .with_context(|| format!("unable to upload {}", plan.local_path.display()))?;
+            client
+                .upload_bytes(plan.enriched_xml_content.as_bytes(), &plan.xml_dropbox_path)
+                .await
+                .with_context(|| format!("unable to upload companion XML for {}", plan.local_path.display()))?;
+            remote_index.add_file(plan.dropbox_path.clone(), dropbox_content_hash.clone());
+            remote_index.add_file(
+                plan.xml_dropbox_path.clone(),
+                compute_dropbox_content_hash_bytes(plan.enriched_xml_content.as_bytes()),
+            );
             archive.append(build_archive_record(
                 job,
-                &normalized_root,
+                normalized_root,
                 &parsed_payload,
-                &xml_payload,
+                &plan.enriched_xml_content,
                 &ai_payload,
                 &parsed,
                 &ai,
                 &plan,
+                &dropbox_content_hash,
             )?)?;
             archive_dirty = true;
             info!(
-                "😎 Uploaded [{}] -> [{}]",
+                "😎 Uploaded [{}] -> [{}] and [{}]",
                 plan.local_path.display(),
-                plan.dropbox_path
+                plan.dropbox_path,
+                plan.xml_dropbox_path
             );
         }
 
@@ -388,6 +424,8 @@ fn build_upload_plans(
     attachment_paths: &[PathBuf],
     parsed: &ParsedEmailMetadata,
     ai: &AiClassification,
+    source_xml_payload: &str,
+    ai_payload: &str,
 ) -> Result<Vec<AttachmentUploadPlan>> {
     let local_by_name = attachment_paths
         .iter()
@@ -411,6 +449,7 @@ fn build_upload_plans(
     let mut plans = Vec::new();
     let mut seen = HashSet::new();
     let year_folder = resolve_year_folder(parsed, ai)?;
+    let enriched_xml_content = embed_ai_payload_in_xml(source_xml_payload, ai_payload);
     for attachment in &ai.attachment_summaries {
         let local_path = local_by_name.get(&attachment.file_name).ok_or_else(|| {
             anyhow!(
@@ -426,13 +465,9 @@ fn build_upload_plans(
         })?;
         let final_file_name =
             ensure_original_extension(&attachment.proposed_file_name, &attachment.file_name)?;
-        let dropbox_path = build_dropbox_file_path(
-            dropbox_root_folder,
-            &ai.main_folder,
-            &ai.sub_folder,
-            &year_folder,
-            &final_file_name,
-        )?;
+        let dropbox_path = build_dropbox_file_path(dropbox_root_folder, &final_file_name)?;
+        let xml_file_name = xml_file_name_from_final_file_name(&final_file_name)?;
+        let xml_dropbox_path = build_dropbox_file_path(dropbox_root_folder, &xml_file_name)?;
         seen.insert(attachment.file_name.clone());
         plans.push(AttachmentUploadPlan {
             source_file_name: attachment.file_name.clone(),
@@ -454,6 +489,9 @@ fn build_upload_plans(
             year_folder: year_folder.clone(),
             final_file_name,
             dropbox_path,
+            xml_file_name,
+            xml_dropbox_path,
+            enriched_xml_content: enriched_xml_content.clone(),
         });
     }
 
@@ -482,6 +520,7 @@ fn build_archive_record(
     parsed: &ParsedEmailMetadata,
     ai: &AiClassification,
     plan: &AttachmentUploadPlan,
+    dropbox_content_hash: &str,
 ) -> Result<ArchiveRecord> {
     Ok(ArchiveRecord {
         layout_version: TABLE_LAYOUT_VERSION.to_string(),
@@ -491,6 +530,9 @@ fn build_archive_record(
         final_file_name: plan.final_file_name.clone(),
         dropbox_root_folder: normalized_root.to_string(),
         dropbox_path: plan.dropbox_path.clone(),
+        dropbox_content_hash: dropbox_content_hash.to_string(),
+        xml_file_name: plan.xml_file_name.clone(),
+        xml_dropbox_path: plan.xml_dropbox_path.clone(),
         main_folder: plan.main_folder.clone(),
         sub_folder: plan.sub_folder.clone(),
         year_folder: plan.year_folder.clone(),
@@ -518,6 +560,63 @@ fn build_archive_record(
         attachment_confidence: plan.attachment_confidence.clone(),
         attachment_mime_type: plan.mime_type.clone(),
     })
+}
+
+impl DropboxRemoteIndex {
+    fn from_remote_files(files: Vec<DropboxRemoteFile>) -> Self {
+        let mut index = Self::default();
+        for file in files {
+            index.add_file(file.path_display, file.content_hash);
+        }
+        index
+    }
+
+    fn add_file(&mut self, path: String, content_hash: String) {
+        self.paths_by_content_hash
+            .entry(content_hash)
+            .or_default()
+            .push(path);
+    }
+
+    fn paths_for_content_hash(&self, content_hash: &str) -> Option<&Vec<String>> {
+        self.paths_by_content_hash.get(content_hash)
+    }
+
+    fn len(&self) -> usize {
+        self.paths_by_content_hash
+            .values()
+            .map(|paths| paths.len())
+            .sum()
+    }
+}
+
+fn xml_file_name_from_final_file_name(final_file_name: &str) -> Result<String> {
+    let stem = Path::new(final_file_name)
+        .file_stem()
+        .or_else(|| Path::new(final_file_name).file_name())
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("unable to derive xml file name from `{final_file_name}`"))?;
+    Ok(format!("{stem}.xml"))
+}
+
+fn embed_ai_payload_in_xml(xml_payload: &str, ai_payload: &str) -> String {
+    let ai_block = format!("  <ai-enrich><![CDATA[{}]]></ai-enrich>\n", wrap_cdata(ai_payload));
+    let regex = Regex::new(r"(?s)\s*<ai-enrich><!\[CDATA\[.*?\]\]></ai-enrich>\s*")
+        .expect("invalid regex");
+    let cleaned = regex.replace_all(xml_payload, "\n").into_owned();
+
+    if let Some(index) = cleaned.rfind("</email-content>") {
+        let (head, tail) = cleaned.split_at(index);
+        format!("{head}{ai_block}{tail}")
+    } else {
+        format!("{cleaned}\n{ai_block}")
+    }
+}
+
+fn wrap_cdata(value: &str) -> String {
+    value.replace("]]>", "]]]]><![CDATA[>")
 }
 
 fn resolve_year_folder(parsed: &ParsedEmailMetadata, ai: &AiClassification) -> Result<String> {
@@ -579,9 +678,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        AiAttachmentSummary, AiClassification, ParsedAttachment, ParsedEmailMetadata,
-        build_upload_plans,
+        AiAttachmentSummary, AiClassification, DropboxRemoteIndex, ParsedAttachment,
+        ParsedEmailMetadata, build_upload_plans,
     };
+    use crate::dropbox::DropboxRemoteFile;
 
     #[test]
     fn builds_upload_plan_from_ai_and_parse_outputs() {
@@ -613,13 +713,34 @@ mod tests {
                     proposed_file_name: "2024-03-15 techvalley fin-contrat".to_string(),
                 }],
             },
+            "<email-content></email-content>",
+            "{\"main_folder\":\"DENIS\"}",
         )
         .unwrap();
 
         assert_eq!(plans.len(), 1);
         assert_eq!(
             plans[0].dropbox_path,
-            "/Archives/DENIS/LEGAL/2024/2024-03-15 techvalley fin-contrat.pdf"
+            "/Archives/A_TRAITER/2024-03-15 techvalley fin-contrat.pdf"
         );
+        assert_eq!(plans[0].xml_dropbox_path, "/Archives/A_TRAITER/2024-03-15 techvalley fin-contrat.xml");
+        assert!(plans[0].enriched_xml_content.contains("<ai-enrich><![CDATA[{\"main_folder\":\"DENIS\"}]]></ai-enrich>"));
+    }
+
+    #[test]
+    fn indexes_dropbox_files_by_content_hash() {
+        let index = DropboxRemoteIndex::from_remote_files(vec![
+            DropboxRemoteFile {
+                path_display: "/COBRA_TEST/A_TRAITER/a.pdf".to_string(),
+                content_hash: "hash-a".to_string(),
+            },
+            DropboxRemoteFile {
+                path_display: "/COBRA_TEST/Archives/a.pdf".to_string(),
+                content_hash: "hash-a".to_string(),
+            },
+        ]);
+
+        assert_eq!(index.len(), 2);
+        assert_eq!(index.paths_for_content_hash("hash-a").map(Vec::len), Some(2));
     }
 }

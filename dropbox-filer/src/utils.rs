@@ -1,8 +1,13 @@
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use html_escape::decode_html_entities;
 use regex::Regex;
+use sha2::{Digest, Sha256};
+
+const DROPBOX_CONTENT_HASH_BLOCK_BYTES: usize = 4 * 1024 * 1024;
 
 pub fn sanitize_filename(name: &str) -> String {
     let decoded = decode_html_entities(name).to_string();
@@ -73,15 +78,10 @@ pub fn ensure_original_extension(proposed_file_name: &str, original_file_name: &
 
 pub fn build_dropbox_file_path(
     root: &str,
-    main_folder: &str,
-    sub_folder: &str,
-    year_folder: &str,
     file_name: &str,
 ) -> Result<String> {
     let root = normalize_dropbox_root(root)?;
-    let main_folder = sanitize_path_segment(main_folder)?;
-    let sub_folder = sanitize_path_segment(sub_folder)?;
-    let year_folder = sanitize_path_segment(year_folder)?;
+    let waiting_folder = sanitize_path_segment("A_TRAITER")?;
     let file_name = sanitize_path_segment(file_name)?;
 
     let mut segments = Vec::new();
@@ -93,9 +93,7 @@ pub fn build_dropbox_file_path(
                 .map(str::to_string),
         );
     }
-    segments.push(main_folder);
-    segments.push(sub_folder);
-    segments.push(year_folder);
+    segments.push(waiting_folder);
     segments.push(file_name);
 
     Ok(format!("/{}", segments.join("/")))
@@ -149,6 +147,43 @@ pub fn escape_non_ascii_json(raw_json: &str) -> String {
     escaped
 }
 
+pub fn compute_dropbox_content_hash(path: &Path) -> Result<String> {
+    let mut file = File::open(path).with_context(|| format!("unable to open {}", path.display()))?;
+    let mut buffer = vec![0u8; DROPBOX_CONTENT_HASH_BLOCK_BYTES];
+    let mut block_digests = Vec::new();
+
+    loop {
+        let bytes_read = file
+            .read(&mut buffer)
+            .with_context(|| format!("unable to read {}", path.display()))?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        let digest = Sha256::digest(&buffer[..bytes_read]);
+        block_digests.extend_from_slice(&digest);
+    }
+
+    Ok(hex_sha256(&block_digests))
+}
+
+pub fn compute_dropbox_content_hash_bytes(bytes: &[u8]) -> String {
+    let mut block_digests = Vec::new();
+    for chunk in bytes.chunks(DROPBOX_CONTENT_HASH_BLOCK_BYTES) {
+        let digest = Sha256::digest(chunk);
+        block_digests.extend_from_slice(&digest);
+    }
+    hex_sha256(&block_digests)
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    let final_digest = Sha256::digest(bytes);
+    final_digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 fn fallback_file_name(original_file_name: &str) -> Result<String> {
     let sanitized = sanitize_filename(original_file_name);
     if sanitized.is_empty() {
@@ -161,7 +196,8 @@ fn fallback_file_name(original_file_name: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_dropbox_file_path, ensure_original_extension, folder_prefixes, normalize_dropbox_root,
+        build_dropbox_file_path, compute_dropbox_content_hash_bytes, ensure_original_extension,
+        folder_prefixes, normalize_dropbox_root,
     };
 
     #[test]
@@ -189,8 +225,8 @@ mod tests {
     #[test]
     fn builds_dropbox_path_from_root_and_tags() {
         assert_eq!(
-            build_dropbox_file_path("/Archives", "DENIS", "IMPOTS", "2025", "avis.pdf").unwrap(),
-            "/Archives/DENIS/IMPOTS/2025/avis.pdf"
+            build_dropbox_file_path("/Archives", "avis.pdf").unwrap(),
+            "/Archives/A_TRAITER/avis.pdf"
         );
     }
 
@@ -203,6 +239,14 @@ mod tests {
                 "/Archives/DENIS".to_string(),
                 "/Archives/DENIS/IMPOTS".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn computes_dropbox_content_hash_for_bytes() {
+        assert_eq!(
+            compute_dropbox_content_hash_bytes(b"hello world"),
+            "bc62d4b80d9e36da29c16c5d4d9f11731f36052c72401a76c23c0fb5a9b74423"
         );
     }
 }

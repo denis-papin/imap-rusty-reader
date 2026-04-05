@@ -242,15 +242,16 @@ Pour chaque dossier email contenant :
 
 il :
 - associe chaque pièce jointe locale à son entrée `attachment_summaries`
-- utilise `main_folder` et `sub_folder` comme sous-dossiers Dropbox
-- ajoute un sous-dossier annuel `YYYY`, déduit en priorité de la date présente dans `proposed_file_name`, puis de la date de l’email en secours
+- n’écrit plus dans le dossier final suggéré, mais dépose tout dans `/<racine>/A_TRAITER/`
 - renomme le fichier avec `proposed_file_name`
 - réapplique l’extension d’origine si besoin
+- génère aussi un fichier XML compagnon du même nom logique, avec extension `.xml`
+- enrichit ce XML avec une balise `<ai-enrich><![CDATA[...]]></ai-enrich>` contenant le JSON brut de `<email>.ai.json`
 - crée les dossiers distants manquants via l’API Dropbox
-- uploade le fichier sans supprimer la copie locale
+- uploade le fichier et son XML sans supprimer les copies locales
 
 Le programme écrit aussi :
-- `dropbox_uploads.parquet` à la racine de `emailFolder` : table Parquet consultable par DataFusion, contenant les fichiers envoyés avec leur MD5, leur nom final, leurs tags, le contenu XML et le contenu `ai.json`
+- `dropbox_uploads.parquet` à la racine de `emailFolder` : table Parquet consultable par DataFusion, contenant les fichiers envoyés avec leur MD5, leur nom final, leur checksum Dropbox `content_hash`, leurs tags, le contenu XML enrichi et le contenu `ai.json`
 - `<email>.dropbox.error.json` : diagnostic si le rangement Dropbox échoue
 
 Par défaut :
@@ -258,8 +259,9 @@ Par défaut :
 - la racine Dropbox est lue depuis `dropboxRootFolder`
 - un `--root` peut surcharger cette racine au lancement
 - avant chaque upload, `dropbox-filer` vérifie la table Parquet par MD5
-- si le MD5 existe déjà dans la table, `dropbox-filer` vérifie d’abord que le fichier est toujours présent sur Dropbox avant de le sauter
-- le chemin cible suit la forme `/<racine>/<main_folder>/<sub_folder>/<YYYY>/<proposed_file_name>`
+- si le MD5 existe déjà dans la table, `dropbox-filer` liste récursivement les fichiers présents sous la racine Dropbox ciblée et ne saute l’upload que si un fichier distant expose le même `content_hash` que la pièce jointe locale
+- si le MD5 existe dans la table mais qu’aucun fichier distant de même contenu n’est retrouvé, le fichier est renvoyé vers Dropbox et une nouvelle ligne est ajoutée à la table Parquet
+- le chemin cible suit la forme `/<racine>/A_TRAITER/<proposed_file_name>` et `/<racine>/A_TRAITER/<proposed_file_name sans extension>.xml`
 - le programme échoue si `ai-enrich` n’a pas produit une suggestion de nom pour chaque pièce jointe présente
 - `dropbox-filer` rafraîchit un access token court au démarrage quand il reçoit app key + app secret + refresh token
 

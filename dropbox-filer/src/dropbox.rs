@@ -22,9 +22,32 @@ pub struct DropboxClient {
     ensured_folders: Mutex<Vec<String>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DropboxRemoteFile {
+    pub path_display: String,
+    pub content_hash: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct UploadSessionStartResponse {
     session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListFolderResponse {
+    entries: Vec<MetadataEntry>,
+    cursor: String,
+    has_more: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct MetadataEntry {
+    #[serde(rename = ".tag")]
+    tag: String,
+    #[serde(default)]
+    path_display: Option<String>,
+    #[serde(default)]
+    content_hash: Option<String>,
 }
 
 impl DropboxClient {
@@ -86,36 +109,69 @@ impl DropboxClient {
         }
     }
 
-    pub async fn file_exists(&self, path: &str) -> Result<bool> {
-        let url = format!("{}/2/files/get_metadata", self.api_base_url);
+    pub async fn upload_bytes(&self, bytes: &[u8], remote_path: &str) -> Result<()> {
+        let arg = escape_non_ascii_json(&serde_json::to_string(&json!({
+            "path": remote_path,
+            "mode": "add",
+            "autorename": false,
+            "mute": true,
+            "strict_conflict": false
+        }))?);
+        let url = format!("{}/2/files/upload", self.content_base_url);
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.access_token)
+            .header("Content-Type", "application/octet-stream")
+            .header("Dropbox-API-Arg", arg)
+            .body(bytes.to_vec())
+            .send()
+            .await
+            .with_context(|| format!("unable to upload in-memory content to {remote_path}"))?;
+
+        self.ensure_upload_success(response, remote_path).await
+    }
+
+    pub async fn list_files_recursive(&self, root: &str) -> Result<Vec<DropboxRemoteFile>> {
+        let url = format!("{}/2/files/list_folder", self.api_base_url);
         let response = self
             .http
             .post(&url)
             .bearer_auth(&self.access_token)
             .json(&json!({
-                "path": path,
-                "include_deleted": false
+                "path": root,
+                "recursive": true,
+                "include_deleted": false,
+                "include_has_explicit_shared_members": false,
+                "include_mounted_folders": true,
+                "include_non_downloadable_files": true
             }))
             .send()
             .await
-            .with_context(|| format!("unable to check metadata for `{path}`"))?;
-
-        if response.status().is_success() {
-            return Ok(true);
-        }
+            .with_context(|| format!("unable to list dropbox folder `{root}`"))?;
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         if status.as_u16() == 409 && body.contains("not_found") {
-            return Ok(false);
+            return Ok(Vec::new());
+        }
+        if !status.is_success() {
+            bail!(
+                "dropbox list_folder failed [{}] status {}: {}",
+                root,
+                status,
+                compact_body(&body)
+            );
         }
 
-        bail!(
-            "dropbox get_metadata failed [{}] status {}: {}",
-            path,
-            status,
-            compact_body(&body)
-        );
+        let mut parsed = serde_json::from_str::<ListFolderResponse>(&body)
+            .with_context(|| "unable to parse dropbox list_folder response")?;
+        let mut files = metadata_entries_to_remote_files(parsed.entries);
+        while parsed.has_more {
+            parsed = self.list_files_continue(&parsed.cursor).await?;
+            files.extend(metadata_entries_to_remote_files(parsed.entries));
+        }
+        Ok(files)
     }
 
     async fn create_folder(&self, path: &str) -> Result<()> {
@@ -311,6 +367,44 @@ impl DropboxClient {
             compact_body(&body)
         );
     }
+
+    async fn list_files_continue(&self, cursor: &str) -> Result<ListFolderResponse> {
+        let url = format!("{}/2/files/list_folder/continue", self.api_base_url);
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.access_token)
+            .json(&json!({ "cursor": cursor }))
+            .send()
+            .await
+            .with_context(|| "unable to continue Dropbox list_folder")?;
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            bail!(
+                "dropbox list_folder/continue failed status {}: {}",
+                status,
+                compact_body(&body)
+            );
+        }
+
+        serde_json::from_str::<ListFolderResponse>(&body)
+            .with_context(|| "unable to parse dropbox list_folder/continue response")
+    }
+}
+
+fn metadata_entries_to_remote_files(entries: Vec<MetadataEntry>) -> Vec<DropboxRemoteFile> {
+    entries
+        .into_iter()
+        .filter(|entry| entry.tag == "file")
+        .filter_map(|entry| {
+            Some(DropboxRemoteFile {
+                path_display: entry.path_display?,
+                content_hash: entry.content_hash?,
+            })
+        })
+        .collect()
 }
 
 fn compact_body(body: &str) -> String {

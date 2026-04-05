@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -21,6 +21,9 @@ const COLUMN_SOURCE_FILE_NAME: &str = "source_file_name";
 const COLUMN_FINAL_FILE_NAME: &str = "final_file_name";
 const COLUMN_DROPBOX_ROOT_FOLDER: &str = "dropbox_root_folder";
 const COLUMN_DROPBOX_PATH: &str = "dropbox_path";
+const COLUMN_DROPBOX_CONTENT_HASH: &str = "dropbox_content_hash";
+const COLUMN_XML_FILE_NAME: &str = "xml_file_name";
+const COLUMN_XML_DROPBOX_PATH: &str = "xml_dropbox_path";
 const COLUMN_MAIN_FOLDER: &str = "main_folder";
 const COLUMN_SUB_FOLDER: &str = "sub_folder";
 const COLUMN_YEAR_FOLDER: &str = "year_folder";
@@ -48,7 +51,7 @@ const COLUMN_ATTACHMENT_MIME_TYPE: &str = "attachment_mime_type";
 pub struct DropboxArchiveTable {
     path: PathBuf,
     records: Vec<ArchiveRecord>,
-    md5_to_path: HashMap<String, String>,
+    md5_index: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +63,9 @@ pub struct ArchiveRecord {
     pub final_file_name: String,
     pub dropbox_root_folder: String,
     pub dropbox_path: String,
+    pub dropbox_content_hash: String,
+    pub xml_file_name: String,
+    pub xml_dropbox_path: String,
     pub main_folder: String,
     pub sub_folder: String,
     pub year_folder: String,
@@ -91,19 +97,19 @@ impl DropboxArchiveTable {
             return Ok(Self {
                 path,
                 records: Vec::new(),
-                md5_to_path: HashMap::new(),
+                md5_index: HashSet::new(),
             });
         }
 
         let records = load_records_with_datafusion(&path).await?;
-        let md5_to_path = records
+        let md5_index = records
             .iter()
-            .map(|record| (record.md5.clone(), record.dropbox_path.clone()))
-            .collect::<HashMap<_, _>>();
+            .map(|record| record.md5.clone())
+            .collect::<HashSet<_>>();
         Ok(Self {
             path,
             records,
-            md5_to_path,
+            md5_index,
         })
     }
 
@@ -116,16 +122,11 @@ impl DropboxArchiveTable {
     }
 
     pub fn contains_md5(&self, md5: &str) -> bool {
-        self.md5_to_path.contains_key(md5)
-    }
-
-    pub fn existing_path_for_md5(&self, md5: &str) -> Option<&str> {
-        self.md5_to_path.get(md5).map(String::as_str)
+        self.md5_index.contains(md5)
     }
 
     pub fn append(&mut self, record: ArchiveRecord) -> Result<()> {
-        self.md5_to_path
-            .insert(record.md5.clone(), record.dropbox_path.clone());
+        self.md5_index.insert(record.md5.clone());
         self.records.push(record);
         Ok(())
     }
@@ -173,6 +174,24 @@ impl DropboxArchiveTable {
                 self.records
                     .iter()
                     .map(|record| record.dropbox_path.clone())
+                    .collect(),
+            ),
+            large_string_array(
+                self.records
+                    .iter()
+                    .map(|record| record.dropbox_content_hash.clone())
+                    .collect(),
+            ),
+            large_string_array(
+                self.records
+                    .iter()
+                    .map(|record| record.xml_file_name.clone())
+                    .collect(),
+            ),
+            large_string_array(
+                self.records
+                    .iter()
+                    .map(|record| record.xml_dropbox_path.clone())
                     .collect(),
             ),
             large_string_array(
@@ -366,6 +385,9 @@ fn read_batch(batch: &RecordBatch) -> Result<Vec<ArchiveRecord>> {
     let final_file_name = column_values(batch, COLUMN_FINAL_FILE_NAME)?;
     let dropbox_root_folder = column_values(batch, COLUMN_DROPBOX_ROOT_FOLDER)?;
     let dropbox_path = column_values(batch, COLUMN_DROPBOX_PATH)?;
+    let dropbox_content_hash = column_values(batch, COLUMN_DROPBOX_CONTENT_HASH)?;
+    let xml_file_name = column_values(batch, COLUMN_XML_FILE_NAME)?;
+    let xml_dropbox_path = column_values(batch, COLUMN_XML_DROPBOX_PATH)?;
     let main_folder = column_values(batch, COLUMN_MAIN_FOLDER)?;
     let sub_folder = column_values(batch, COLUMN_SUB_FOLDER)?;
     let year_folder = column_values(batch, COLUMN_YEAR_FOLDER)?;
@@ -399,6 +421,9 @@ fn read_batch(batch: &RecordBatch) -> Result<Vec<ArchiveRecord>> {
             final_file_name: final_file_name[index].clone(),
             dropbox_root_folder: dropbox_root_folder[index].clone(),
             dropbox_path: dropbox_path[index].clone(),
+            dropbox_content_hash: dropbox_content_hash[index].clone(),
+            xml_file_name: xml_file_name[index].clone(),
+            xml_dropbox_path: xml_dropbox_path[index].clone(),
             main_folder: main_folder[index].clone(),
             sub_folder: sub_folder[index].clone(),
             year_folder: year_folder[index].clone(),
@@ -427,10 +452,10 @@ fn read_batch(batch: &RecordBatch) -> Result<Vec<ArchiveRecord>> {
 }
 
 fn column_values(batch: &RecordBatch, name: &str) -> Result<Vec<String>> {
-    let index = batch
-        .schema_ref()
-        .index_of(name)
-        .with_context(|| format!("missing parquet column `{name}`"))?;
+    let index = match batch.schema_ref().index_of(name) {
+        Ok(index) => index,
+        Err(_) => return Ok(vec![String::new(); batch.num_rows()]),
+    };
     let column = batch.column(index);
     (0..column.len())
         .map(|row| {
@@ -451,6 +476,9 @@ fn table_schema() -> Arc<Schema> {
             COLUMN_FINAL_FILE_NAME,
             COLUMN_DROPBOX_ROOT_FOLDER,
             COLUMN_DROPBOX_PATH,
+            COLUMN_DROPBOX_CONTENT_HASH,
+            COLUMN_XML_FILE_NAME,
+            COLUMN_XML_DROPBOX_PATH,
             COLUMN_MAIN_FOLDER,
             COLUMN_SUB_FOLDER,
             COLUMN_YEAR_FOLDER,
@@ -504,7 +532,10 @@ mod tests {
                 source_file_name: "source.pdf".to_string(),
                 final_file_name: "final.pdf".to_string(),
                 dropbox_root_folder: "/COBRA_TEST".to_string(),
-                dropbox_path: "/COBRA_TEST/DENIS/FACTURES/2026/final.pdf".to_string(),
+                dropbox_path: "/COBRA_TEST/A_TRAITER/final.pdf".to_string(),
+                dropbox_content_hash: "hash123".to_string(),
+                xml_file_name: "final.xml".to_string(),
+                xml_dropbox_path: "/COBRA_TEST/A_TRAITER/final.xml".to_string(),
                 main_folder: "DENIS".to_string(),
                 sub_folder: "FACTURES".to_string(),
                 year_folder: "2026".to_string(),
@@ -534,9 +565,5 @@ mod tests {
         let reloaded = DropboxArchiveTable::load(dir.path()).await.unwrap();
         assert_eq!(reloaded.len(), 1);
         assert!(reloaded.contains_md5("abc"));
-        assert_eq!(
-            reloaded.existing_path_for_md5("abc"),
-            Some("/COBRA_TEST/DENIS/FACTURES/2026/final.pdf")
-        );
     }
 }
