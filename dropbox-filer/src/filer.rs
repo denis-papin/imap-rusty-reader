@@ -318,6 +318,7 @@ impl DropboxFiler {
             );
         }
 
+        self.cleanup_processed_email(job)?;
         remove_error_file(job)?;
         Ok(archive_dirty)
     }
@@ -330,6 +331,32 @@ impl DropboxFiler {
         let path = error_path(job);
         fs::write(&path, serde_json::to_string_pretty(&payload)?)
             .with_context(|| format!("unable to write {}", path.display()))?;
+        Ok(())
+    }
+
+    fn cleanup_processed_email(&self, job: &EmailJob) -> Result<()> {
+        if self.dry_run {
+            return Ok(());
+        }
+
+        let source_eml_path = source_email_path(&self.config.email_folder, job, &self.config.parse_ia_folder)?;
+        if source_eml_path.exists() {
+            fs::remove_file(&source_eml_path)
+                .with_context(|| format!("unable to remove {}", source_eml_path.display()))?;
+            info!("🧹 Removed source email [{}]", source_eml_path.display());
+        } else {
+            warn!(
+                "💣 Source email already missing during cleanup [{}]",
+                source_eml_path.display()
+            );
+        }
+
+        if job.folder.exists() {
+            fs::remove_dir_all(&job.folder)
+                .with_context(|| format!("unable to remove {}", job.folder.display()))?;
+            info!("🧹 Removed parse folder [{}]", job.folder.display());
+        }
+
         Ok(())
     }
 }
@@ -665,6 +692,25 @@ fn error_path(job: &EmailJob) -> PathBuf {
     job.folder.join(format!("{}{}", job.stem, ERROR_SUFFIX))
 }
 
+fn source_email_path(email_root: &str, job: &EmailJob, parse_ia_folder: &str) -> Result<PathBuf> {
+    let account_root = Path::new(email_root).join(&job.account_name);
+    let parse_root = account_root.join(parse_ia_folder);
+    let relative_job_path = job
+        .folder
+        .strip_prefix(&parse_root)
+        .with_context(|| {
+            format!(
+                "unable to compute job path relative to parse folder {} from {}",
+                parse_root.display(),
+                job.folder.display()
+            )
+        })?;
+    let relative_parent = relative_job_path.parent().unwrap_or_else(|| Path::new(""));
+    Ok(account_root
+        .join(relative_parent)
+        .join(format!("{}.eml", job.stem)))
+}
+
 fn remove_error_file(job: &EmailJob) -> Result<()> {
     let path = error_path(job);
     if path.exists() {
@@ -679,7 +725,7 @@ mod tests {
 
     use super::{
         AiAttachmentSummary, AiClassification, DropboxRemoteIndex, ParsedAttachment,
-        ParsedEmailMetadata, build_upload_plans,
+        ParsedEmailMetadata, EmailJob, build_upload_plans, source_email_path,
     };
     use crate::dropbox::DropboxRemoteFile;
 
@@ -742,5 +788,28 @@ mod tests {
 
         assert_eq!(index.len(), 2);
         assert_eq!(index.paths_for_content_hash("hash-a").map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn resolves_source_eml_path_from_parse_folder() {
+        let job = EmailJob {
+            account_name: "Gestion Fastmail".to_string(),
+            folder: PathBuf::from(
+                "/mnt/backup/Mes Emails (Test)/Gestion Fastmail/_parse-ai/EDF (test@example.com)/Sujet",
+            ),
+            stem: "Sujet".to_string(),
+            json_path: PathBuf::new(),
+            xml_path: PathBuf::new(),
+            ai_path: PathBuf::new(),
+            attachments: Vec::new(),
+        };
+
+        let source = source_email_path("/mnt/backup/Mes Emails (Test)", &job, "_parse-ai").unwrap();
+        assert_eq!(
+            source,
+            PathBuf::from(
+                "/mnt/backup/Mes Emails (Test)/Gestion Fastmail/EDF (test@example.com)/Sujet.eml"
+            )
+        );
     }
 }

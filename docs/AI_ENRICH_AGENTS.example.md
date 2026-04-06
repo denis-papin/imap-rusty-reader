@@ -45,14 +45,48 @@ Utiliser uniquement `HAUTE` ou `BASSE`.
 - Choisir exactement un `main_folder`.
 - Choisir exactement un `sub_folder`.
 - Le `sub_folder` doit etre compatible avec le `main_folder`.
+- Choisir `DENIS` pour les documents personnels de vie courante : assurance, Audi, banque, factures, impots, legal, retraite, salaires, sante et securite sociale.
+- Choisir `ISD` pour tout ce qui concerne l'activite InSoft Design, y compris i-smile, doka, doka one et Klyrio.
+- Choisir `SCI_LES_ROSES` pour tout ce qui concerne la SCI Les Roses, l'immobilier locatif, les assurances, la banque, les factures, les impots, Kara, la location, les taxes, la Villa 2 et le legal lie a ce patrimoine.
+- Choisir aussi `SCI_LES_ROSES` si l'email ou une piece jointe mentionne `Villa 1`, `Villa 2`, `Villa 3` ou l'identifiant / l'adresse `gestion`.
 
 ## Folder Taxonomy
 
 ```json
 {
-  "DENIS": ["A_TRAITER", "BANQUES", "FACTURES", "IMPOTS", "LEGAL", "SANTE", "ASSURANCES", "SECU", "SALAIRES", "DIVERS"],
-  "TRAVAIL": ["A_TRAITER", "SALAIRES", "LEGAL", "SECU", "BANQUES", "IMPOTS", "ASSURANCES", "DIVERS"],
-  "DOKA": ["A_TRAITER", "DEV", "COMMERCIAL", "FACTURES", "BANQUES", "IMPOTS", "LEGAL", "TVA", "DIVERS"]
+  "DENIS": [
+    "ASSURANCE",
+    "AUDI",
+    "BANQUE",
+    "FACTURE",
+    "IMPOTS",
+    "LEGAL",
+    "RETRAITE",
+    "SALAIRES",
+    "SANTE",
+    "SECU"
+  ],
+  "ISD": [
+    "AGO",
+    "BANQUE",
+    "CCSS",
+    "FACTURES CLIENTS",
+    "Factures Fournisseurs",
+    "IMPOTS",
+    "LEGAL",
+    "TVA"
+  ],
+  "SCI_LES_ROSES": [
+    "ASSURANCE",
+    "BANQUE",
+    "FACTURE",
+    "IMPOTS",
+    "KARA",
+    "LEGAL",
+    "LOCATION",
+    "TAXES",
+    "VILLA 2"
+  ]
 }
 ```
 
@@ -112,18 +146,18 @@ Utiliser uniquement `HAUTE` ou `BASSE`.
 
 ```json
 {
-  "email_summary": "fin de contrat de travail",
+  "email_summary": "facture de gestion locative",
   "email_importance": "HAUTE",
-  "main_folder": "TRAVAIL",
-  "sub_folder": "LEGAL",
+  "main_folder": "SCI_LES_ROSES",
+  "sub_folder": "LOCATION",
   "attachment_summaries": [
     {
-      "file_name": "courrier.pdf",
+      "file_name": "facture.pdf",
       "mime_type": "application/pdf",
-      "summary": "courrier relatif a la fin du contrat de travail",
+      "summary": "facture de gestion pour la villa 2",
       "confidence": 0.92,
       "importance": "HAUTE",
-      "proposed_file_name": "2024-03-15 techvalley fin-contrat.pdf"
+      "proposed_file_name": "2024-03-15 gestion facture villa 2.pdf"
     }
   ]
 }

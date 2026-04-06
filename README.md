@@ -248,7 +248,9 @@ il :
 - génère aussi un fichier XML compagnon du même nom logique, avec extension `.xml`
 - enrichit ce XML avec une balise `<ai-enrich><![CDATA[...]]></ai-enrich>` contenant le JSON brut de `<email>.ai.json`
 - crée les dossiers distants manquants via l’API Dropbox
-- uploade le fichier et son XML sans supprimer les copies locales
+- uploade le fichier et son XML
+- après un traitement réussi, supprime le dossier email correspondant dans `_parse-ai`
+- après un traitement réussi, supprime aussi le fichier `.eml` source d’origine dans le dossier parent de `_parse-ai`
 
 Le programme écrit aussi :
 - `dropbox_uploads.parquet` à la racine de `emailFolder` : table Parquet consultable par DataFusion, contenant les fichiers envoyés avec leur MD5, leur nom final, leur checksum Dropbox `content_hash`, leurs tags, le contenu XML enrichi et le contenu `ai.json`
@@ -264,6 +266,7 @@ Par défaut :
 - le chemin cible suit la forme `/<racine>/A_TRAITER/<proposed_file_name>` et `/<racine>/A_TRAITER/<proposed_file_name sans extension>.xml`
 - le programme échoue si `ai-enrich` n’a pas produit une suggestion de nom pour chaque pièce jointe présente
 - `dropbox-filer` rafraîchit un access token court au démarrage quand il reçoit app key + app secret + refresh token
+- en `--dry-run`, aucun upload ni nettoyage local n’est effectué
 
 ### Lancer dropbox-filer
 ```bash
