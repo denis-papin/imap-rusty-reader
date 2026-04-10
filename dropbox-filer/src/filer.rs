@@ -14,7 +14,7 @@ use crate::dropbox::{DropboxClient, DropboxRemoteFile};
 use crate::table::{ArchiveRecord, DropboxArchiveTable};
 use crate::utils::{
     build_dropbox_file_path, compute_dropbox_content_hash, compute_dropbox_content_hash_bytes,
-    normalize_dropbox_root,
+    ensure_original_extension, normalize_dropbox_root,
 };
 
 const LEGACY_META_SUFFIX: &str = ".dropbox.json";
@@ -449,7 +449,7 @@ fn discover_account_jobs(
 fn build_upload_plan(
     dropbox_root_folder: &str,
     attachment_path: &Path,
-    xml_path: &Path,
+    _xml_path: &Path,
     parsed: &ParsedEmailMetadata,
     ai: &AiClassification,
     source_xml_payload: &str,
@@ -476,12 +476,9 @@ fn build_upload_plan(
         .map(|value| value.to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| parsed_attachment.original_name.clone());
-    let final_file_name = source_file_name.clone();
-    let xml_file_name = xml_path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| anyhow!("unable to resolve XML file name for {}", xml_path.display()))?
-        .to_string();
+    let final_file_name =
+        ensure_original_extension(&attachment.proposed_file_name, &source_file_name)?;
+    let xml_file_name = xml_file_name_from_final_file_name(&final_file_name)?;
     let main_folder = attachment.main_folder.clone().ok_or_else(|| {
         anyhow!(
             "AI output is missing `main_folder` for `{}`",
@@ -516,6 +513,17 @@ fn build_upload_plan(
         xml_dropbox_path: build_dropbox_file_path(dropbox_root_folder, &xml_file_name)?,
         enriched_xml_content: embed_ai_payload_in_xml(source_xml_payload, ai_payload),
     }))
+}
+
+fn xml_file_name_from_final_file_name(final_file_name: &str) -> Result<String> {
+    let stem = Path::new(final_file_name)
+        .file_stem()
+        .or_else(|| Path::new(final_file_name).file_name())
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("unable to derive xml file name from `{final_file_name}`"))?;
+    Ok(format!("{stem}.xml"))
 }
 
 fn build_archive_record(

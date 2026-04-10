@@ -91,19 +91,6 @@ struct ErrorFile {
     failed_at: String,
 }
 
-#[derive(Debug)]
-struct FinalizedBundle {
-    parsed_payload: String,
-    xml_payload: String,
-    ai_payload: String,
-    json_path: PathBuf,
-    xml_path: PathBuf,
-    ai_path: PathBuf,
-    meta_path: PathBuf,
-    request_path: PathBuf,
-    error_path: PathBuf,
-}
-
 #[derive(Debug, Clone)]
 struct ValidationFailure {
     message: String,
@@ -239,19 +226,14 @@ impl EnrichmentRunner {
             )
             .await?;
 
-        let finalized = finalize_bundle_outputs(
-            job,
-            &self.config.ai_output_suffix,
-            parsed_metadata,
-            &xml_payload,
-            response.output_json.clone(),
-        )?;
-        fs::write(&finalized.json_path, &finalized.parsed_payload)
-            .with_context(|| format!("unable to write {}", finalized.json_path.display()))?;
-        fs::write(&finalized.xml_path, &finalized.xml_payload)
-            .with_context(|| format!("unable to write {}", finalized.xml_path.display()))?;
-        fs::write(&finalized.ai_path, &finalized.ai_payload)
-            .with_context(|| format!("unable to write {}", finalized.ai_path.display()))?;
+        let output_path = job
+            .folder
+            .join(format!("{}{}", job.stem, self.config.ai_output_suffix));
+        fs::write(
+            &output_path,
+            serde_json::to_string_pretty(&response.output_json)?,
+        )
+        .with_context(|| format!("unable to write {}", output_path.display()))?;
 
         let meta = MetaFile {
             input_hash,
@@ -266,18 +248,14 @@ impl EnrichmentRunner {
             usage: response.usage,
             completed_at: Utc::now().to_rfc3339(),
         };
-        fs::write(&finalized.meta_path, serde_json::to_string_pretty(&meta)?)
-            .with_context(|| format!("unable to write {}", finalized.meta_path.display()))?;
+        let meta_path = meta_sidecar_path(&job.folder, &job.stem);
+        fs::write(&meta_path, serde_json::to_string_pretty(&meta)?)
+            .with_context(|| format!("unable to write {}", meta_path.display()))?;
 
-        cleanup_previous_sidecars(job, &finalized, &self.config.ai_output_suffix)?;
-
-        if finalized.error_path.exists() {
-            fs::remove_file(&finalized.error_path)
-                .with_context(|| format!("unable to remove {}", finalized.error_path.display()))?;
-        }
-        if finalized.request_path.exists() {
-            fs::remove_file(&finalized.request_path)
-                .with_context(|| format!("unable to remove {}", finalized.request_path.display()))?;
+        let error_path = error_sidecar_path(&job.folder, &job.stem);
+        if error_path.exists() {
+            fs::remove_file(&error_path)
+                .with_context(|| format!("unable to remove {}", error_path.display()))?;
         }
 
         Ok(())
@@ -739,7 +717,13 @@ For each attachment, choose exactly one `main_folder` and one `sub_folder` from 
 For each attachment, the `sub_folder` must be valid for the selected `main_folder`.\n\
 For each attachment, set `proposed_file_name` using the format `yyyy-mm-dd <emetteur-short> <motif>` and preserve the original file extension when known.\n\
 Use the email date for `yyyy-mm-dd` when available.\n\
-Use a short sender label for `<emetteur-short>` and a concise French reason for `<motif>`.\n\
+Infer `<emetteur-short>` from the attachment content first whenever possible, otherwise from the email body and headers.\n\
+Treat the current local `file_name` only as a weak clue, because it may already contain a poor or generic label.\n\
+If the attachment content or summary reveals a more specific documentary source than the current `file_name`, replace the generic label in `proposed_file_name` with that better source.\n\
+Avoid generic sender labels such as `gestion`, `document`, `courrier`, `scan`, `piece jointe` or `email` unless the evidence is truly insufficient.\n\
+Use a specific organization, brand, person, contract, property, administration, bank, insurer or dossier name when it can be justified from the available content.\n\
+Use a concise but informative French reason for `<motif>` that helps distinguish the document from nearby files.\n\
+Avoid lame generic motives such as `document`, `fichier`, `piece jointe`, `courrier` or `information` unless nothing more precise is supported.\n\
 If evidence is insufficient, say so in the appropriate field and do not invent facts.\n\
 Write all free-text JSON values in French.\n\
 Specifically, `email_summary` and each attachment `summary` must be written in French.\n\
@@ -777,6 +761,7 @@ fn build_primary_prompt(
     format!(
         "Email account: {account_name}\n\
 Email folder name: {email_stem}\n\
+The existing attachment file names may be placeholders and should not be copied blindly into `proposed_file_name`.\n\
 Allowed folder taxonomy:\n```json\n{}\n```\n\n\
 Metadata JSON:\n```json\n{}\n```\n\n\
 Email body extracted from XML:\n```text\n{}\n```\n\n\
@@ -955,241 +940,12 @@ fn is_job_up_to_date(job: &EmailJob, ai_output_suffix: &str, input_hash: &str) -
     Ok(meta.get("input_hash").and_then(Value::as_str) == Some(input_hash))
 }
 
-fn finalize_bundle_outputs(
-    job: &EmailJob,
-    ai_output_suffix: &str,
-    mut parsed: ParsedEmailMetadata,
-    xml_payload: &str,
-    mut ai_output_json: Value,
-) -> Result<FinalizedBundle> {
-    let attachment = parsed
-        .attachments
-        .first_mut()
-        .ok_or_else(|| anyhow!("parse metadata contains no attachment"))?;
-    let ai_attachment = ai_output_json
-        .get_mut("attachment_summaries")
-        .and_then(Value::as_array_mut)
-        .and_then(|attachments| attachments.first_mut())
-        .ok_or_else(|| anyhow!("AI output contains no attachment summary"))?;
-    let proposed_name = ai_attachment
-        .get("proposed_file_name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("AI output is missing `proposed_file_name`"))?;
-    let current_attachment_name = job
-        .attachment_path
-        .as_deref()
-        .and_then(|path| path.file_name())
-        .and_then(|value| value.to_str())
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| attachment.original_name.clone());
-    let desired_file_name = ensure_original_extension(proposed_name, &current_attachment_name)?;
-    let final_file_name = make_unique_bundle_file_name(job, ai_output_suffix, &desired_file_name);
-    let final_stem = file_stem_from_name(&final_file_name);
-
-    attachment.original_name = final_file_name.clone();
-    if let Some(file_name) = ai_attachment.get_mut("file_name") {
-        *file_name = Value::String(final_file_name.clone());
-    }
-    if let Some(proposed_file_name) = ai_attachment.get_mut("proposed_file_name") {
-        *proposed_file_name = Value::String(final_file_name.clone());
-    }
-
-    let parsed_payload =
-        serde_json::to_string_pretty(&parsed).context("unable to serialize renamed parse JSON")?;
-    let ai_payload = serde_json::to_string_pretty(&ai_output_json)
-        .context("unable to serialize renamed AI JSON")?;
-
-    if let Some(source) = job.attachment_path.as_deref() {
-        let target = job.folder.join(&final_file_name);
-        if source != target {
-            fs::rename(source, &target).with_context(|| {
-                format!(
-                    "unable to rename attachment {} -> {}",
-                    source.display(),
-                    target.display()
-                )
-            })?;
-        }
-    }
-
-    Ok(FinalizedBundle {
-        xml_payload: replace_doka_custom_payload(xml_payload, &parsed_payload),
-        ai_payload,
-        parsed_payload,
-        json_path: job.folder.join(format!("{}.json", final_stem)),
-        xml_path: job.folder.join(format!("{}.xml", final_stem)),
-        ai_path: job.folder.join(format!("{}{}", final_stem, ai_output_suffix)),
-        meta_path: meta_sidecar_path(&job.folder, &final_stem),
-        request_path: request_sidecar_path(&job.folder, &final_stem),
-        error_path: error_sidecar_path(&job.folder, &final_stem),
-    })
-}
-
-fn cleanup_previous_sidecars(
-    job: &EmailJob,
-    finalized: &FinalizedBundle,
-    ai_output_suffix: &str,
-) -> Result<()> {
-    let old_paths = vec![
-        job.json_path.clone(),
-        job.xml_path.clone(),
-        job.folder.join(format!("{}{}", job.stem, ai_output_suffix)),
-        meta_sidecar_path(&job.folder, &job.stem),
-        request_sidecar_path(&job.folder, &job.stem),
-        error_sidecar_path(&job.folder, &job.stem),
-    ];
-
-    for path in old_paths {
-        let keep = path == finalized.json_path
-            || path == finalized.xml_path
-            || path == finalized.ai_path
-            || path == finalized.meta_path
-            || path == finalized.request_path
-            || path == finalized.error_path;
-        if keep || !path.exists() {
-            continue;
-        }
-
-        fs::remove_file(&path).with_context(|| format!("unable to remove {}", path.display()))?;
-    }
-
-    Ok(())
-}
-
-fn replace_doka_custom_payload(xml_payload: &str, json_payload: &str) -> String {
-    let replacement = format!(
-        "<doka-custom format=\"json\"><![CDATA[{}]]></doka-custom>",
-        wrap_cdata(json_payload)
-    );
-    let regex = Regex::new(r#"(?s)<doka-custom format="json"><!\[CDATA\[.*?\]\]></doka-custom>"#)
-        .expect("invalid regex");
-    if regex.is_match(xml_payload) {
-        regex.replace(xml_payload, replacement).into_owned()
-    } else {
-        xml_payload.to_string()
-    }
-}
-
-fn wrap_cdata(value: &str) -> String {
-    value.replace("]]>", "]]]]><![CDATA[>")
-}
-
 fn meta_sidecar_path(folder: &Path, stem: &str) -> PathBuf {
     folder.join(format!("{stem}.ai.meta.json"))
 }
 
-fn request_sidecar_path(folder: &Path, stem: &str) -> PathBuf {
-    folder.join(format!("{stem}.ai.request.json"))
-}
-
 fn error_sidecar_path(folder: &Path, stem: &str) -> PathBuf {
     folder.join(format!("{stem}.ai.error.json"))
-}
-
-fn file_stem_from_name(file_name: &str) -> String {
-    Path::new(file_name)
-        .file_stem()
-        .or_else(|| Path::new(file_name).file_name())
-        .and_then(|value| value.to_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("attachment")
-        .to_string()
-}
-
-fn make_unique_bundle_file_name(
-    job: &EmailJob,
-    ai_output_suffix: &str,
-    desired_file_name: &str,
-) -> String {
-    let stem = file_stem_from_name(desired_file_name);
-    let extension = Path::new(desired_file_name)
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(|value| value.to_string());
-
-    let mut current_paths = Vec::new();
-    if let Some(path) = job.attachment_path.clone() {
-        current_paths.push(path);
-    }
-    current_paths.push(job.json_path.clone());
-    current_paths.push(job.xml_path.clone());
-    current_paths.push(job.folder.join(format!("{}{}", job.stem, ai_output_suffix)));
-    current_paths.push(meta_sidecar_path(&job.folder, &job.stem));
-    current_paths.push(request_sidecar_path(&job.folder, &job.stem));
-    current_paths.push(error_sidecar_path(&job.folder, &job.stem));
-
-    for index in 0.. {
-        let candidate = match (&extension, index) {
-            (Some(extension), 0) => format!("{stem}.{extension}"),
-            (Some(extension), value) => format!("{stem}_{value}.{extension}"),
-            (None, 0) => stem.clone(),
-            (None, value) => format!("{stem}_{value}"),
-        };
-        if bundle_file_name_available(job, ai_output_suffix, &candidate, &current_paths) {
-            return candidate;
-        }
-    }
-
-    desired_file_name.to_string()
-}
-
-fn bundle_file_name_available(
-    job: &EmailJob,
-    ai_output_suffix: &str,
-    file_name: &str,
-    current_paths: &[PathBuf],
-) -> bool {
-    let stem = file_stem_from_name(file_name);
-    let candidate_paths = [
-        job.folder.join(file_name),
-        job.folder.join(format!("{}.json", stem)),
-        job.folder.join(format!("{}.xml", stem)),
-        job.folder.join(format!("{}{}", stem, ai_output_suffix)),
-        meta_sidecar_path(&job.folder, &stem),
-        request_sidecar_path(&job.folder, &stem),
-        error_sidecar_path(&job.folder, &stem),
-    ];
-
-    candidate_paths.into_iter().all(|candidate| {
-        !candidate.exists() || current_paths.iter().any(|current| current == &candidate)
-    })
-}
-
-fn ensure_original_extension(proposed_file_name: &str, original_file_name: &str) -> Result<String> {
-    let sanitized = sanitize_file_name(proposed_file_name);
-    let original_extension = Path::new(original_file_name)
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_string());
-
-    if sanitized.is_empty() {
-        return Ok(sanitize_file_name(original_file_name));
-    }
-
-    let proposed_path = Path::new(&sanitized);
-    let proposed_stem = proposed_path
-        .file_stem()
-        .or_else(|| proposed_path.file_name())
-        .and_then(|value| value.to_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("proposed file name is empty after sanitation"))?;
-
-    Ok(match original_extension {
-        Some(extension) => format!("{proposed_stem}.{extension}"),
-        None => sanitized,
-    })
-}
-
-fn sanitize_file_name(name: &str) -> String {
-    Regex::new(r#"[:\\/*?|!#$%^<>"]"#)
-        .expect("invalid regex")
-        .replace_all(name.trim().replace(['\r', '\n', '\t'], "").as_str(), "")
-        .trim()
-        .to_string()
 }
 
 #[cfg(test)]

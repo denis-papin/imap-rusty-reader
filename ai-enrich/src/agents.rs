@@ -151,7 +151,7 @@ fn default_output_schema(folder_taxonomy: &BTreeMap<String, Vec<String>>) -> Val
                         "importance": { "type": "string", "enum": IMPORTANCE_VALUES },
                         "proposed_file_name": {
                             "type": "string",
-                            "description": "Suggested attachment filename using the format yyyy-mm-dd <emetteur-short> <motif> while preserving the original extension when known."
+                            "description": "Suggested attachment filename using the format yyyy-mm-dd <emetteur-short> <motif>, preferring a specific issuer inferred from the attachment content first, then the email context, while preserving the original extension when known."
                         },
                         "main_folder": {
                             "type": "string",

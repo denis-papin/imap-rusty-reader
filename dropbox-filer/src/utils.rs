@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use html_escape::decode_html_entities;
 use regex::Regex;
 use sha2::{Digest, Sha256};
@@ -66,6 +66,37 @@ pub fn build_dropbox_file_path(root: &str, file_name: &str) -> Result<String> {
     segments.push(file_name);
 
     Ok(format!("/{}", segments.join("/")))
+}
+
+pub fn ensure_original_extension(
+    proposed_file_name: &str,
+    original_file_name: &str,
+) -> Result<String> {
+    let sanitized = sanitize_filename(proposed_file_name);
+    let original_extension = Path::new(original_file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+
+    if sanitized.is_empty() {
+        return fallback_file_name(original_file_name);
+    }
+
+    let proposed_path = Path::new(&sanitized);
+    let proposed_stem = proposed_path
+        .file_stem()
+        .or_else(|| proposed_path.file_name())
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("proposed file name is empty after sanitation"))?;
+
+    match original_extension {
+        Some(extension) => Ok(format!("{proposed_stem}.{extension}")),
+        None => Ok(sanitized),
+    }
 }
 
 pub fn parent_dropbox_folder(path: &str) -> Result<String> {
@@ -154,11 +185,20 @@ fn hex_sha256(bytes: &[u8]) -> String {
         .collect()
 }
 
+fn fallback_file_name(original_file_name: &str) -> Result<String> {
+    let sanitized = sanitize_filename(original_file_name);
+    if sanitized.is_empty() {
+        Ok("attachment.bin".to_string())
+    } else {
+        Ok(sanitized)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        build_dropbox_file_path, compute_dropbox_content_hash_bytes, folder_prefixes,
-        normalize_dropbox_root,
+        build_dropbox_file_path, compute_dropbox_content_hash_bytes, ensure_original_extension,
+        folder_prefixes, normalize_dropbox_root,
     };
 
     #[test]
@@ -174,6 +214,14 @@ mod tests {
         assert_eq!(
             build_dropbox_file_path("/Archives", "avis.pdf").unwrap(),
             "/Archives/A_TRAITER/avis.pdf"
+        );
+    }
+
+    #[test]
+    fn keeps_original_extension_when_missing() {
+        assert_eq!(
+            ensure_original_extension("2024-03-15 bnpp releve detaille", "source.pdf").unwrap(),
+            "2024-03-15 bnpp releve detaille.pdf"
         );
     }
 
