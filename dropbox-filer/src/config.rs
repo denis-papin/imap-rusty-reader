@@ -27,7 +27,10 @@ pub struct Config {
     pub dropbox_app_secret: Option<String>,
     #[serde(rename = "dropboxRefreshToken")]
     pub dropbox_refresh_token: Option<String>,
-    #[serde(rename = "dropboxTimeoutSeconds", default = "default_dropbox_timeout_seconds")]
+    #[serde(
+        rename = "dropboxTimeoutSeconds",
+        default = "default_dropbox_timeout_seconds"
+    )]
     pub dropbox_timeout_seconds: u64,
     #[serde(rename = "dropboxOauthTokenUrl")]
     pub dropbox_oauth_token_url: Option<String>,
@@ -61,7 +64,10 @@ fn default_dropbox_timeout_seconds() -> u64 {
     DEFAULT_TIMEOUT_SECONDS
 }
 
-pub fn load_runtime_config(path: Option<&str>, root_override: Option<&str>) -> Result<RuntimeConfig> {
+pub fn load_runtime_config(
+    path: Option<&str>,
+    root_override: Option<&str>,
+) -> Result<RuntimeConfig> {
     let path = path
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(DEFAULT_DEFINITION_PATH);

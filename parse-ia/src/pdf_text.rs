@@ -31,8 +31,8 @@ pub fn extract_pdf_text(path: &Path) -> Result<Option<PdfTextExtraction>> {
         }
     }
 
-    if let Some(text) =
-        extract_pdf_text_with_ocr(path).with_context(|| format!("unable to OCR PDF {}", path.display()))?
+    if let Some(text) = extract_pdf_text_with_ocr(path)
+        .with_context(|| format!("unable to OCR PDF {}", path.display()))?
     {
         return Ok(Some(finalize_extraction(text, "pdf_ocr")));
     }
@@ -169,7 +169,9 @@ fn command_available(name: &str) -> bool {
     Command::new(name)
         .arg("-h")
         .output()
-        .map(|output| output.status.success() || !output.stdout.is_empty() || !output.stderr.is_empty())
+        .map(|output| {
+            output.status.success() || !output.stdout.is_empty() || !output.stderr.is_empty()
+        })
         .unwrap_or(false)
 }
 
@@ -208,6 +210,10 @@ mod tests {
         });
 
         let error = result.expect_err("panic should become an error");
-        assert!(error.to_string().contains("pdf-extract panic: not a number"));
+        assert!(
+            error
+                .to_string()
+                .contains("pdf-extract panic: not a number")
+        );
     }
 }

@@ -93,7 +93,9 @@ async fn fetch_access_token(
         .await
         .with_context(|| "unable to parse Dropbox OAuth token response")?;
     if payload.access_token.trim().is_empty() {
-        return Err(anyhow!("Dropbox OAuth token response did not contain an access token"));
+        return Err(anyhow!(
+            "Dropbox OAuth token response did not contain an access token"
+        ));
     }
     Ok(payload.access_token)
 }

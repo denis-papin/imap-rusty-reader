@@ -25,7 +25,7 @@ pub struct BackupParser {
     parse_folder: PathBuf,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct ParsedEmailRecord {
     parsing_folder: String,
     email_folder: String,
@@ -40,14 +40,14 @@ struct ParsedEmailRecord {
     attachments: Vec<AttachmentRecord>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct HeaderContact {
     raw: String,
     name: Option<String>,
     address: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct AttachmentRecord {
     original_name: String,
     mime_type: String,
@@ -63,8 +63,22 @@ struct AttachmentRecord {
 
 #[derive(Debug)]
 struct ExtractedAttachment {
-    path: PathBuf,
+    path: Option<PathBuf>,
     record: AttachmentRecord,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedEmailContext {
+    parsing_folder: String,
+    email_folder: String,
+    email_file_name: String,
+    message_id: Option<String>,
+    subject: String,
+    expedition_date: Option<String>,
+    author: HeaderContact,
+    targets: Vec<HeaderContact>,
+    cc: Vec<HeaderContact>,
+    bcc: Vec<HeaderContact>,
 }
 
 impl BackupParser {
@@ -158,58 +172,92 @@ impl BackupParser {
             );
             return Ok(());
         }
-        let parse_result = (|| -> Result<()> {
-            let raw = fs::read(email_path)
-                .with_context(|| format!("unable to read {}", email_path.display()))?;
-            let parsed = mailparse::parse_mail(&raw)
-                .with_context(|| format!("unable to parse {}", email_path.display()))?;
+        let raw = fs::read(email_path)
+            .with_context(|| format!("unable to read {}", email_path.display()))?;
+        let parsed = mailparse::parse_mail(&raw)
+            .with_context(|| format!("unable to parse {}", email_path.display()))?;
 
-            fs::create_dir_all(&email_output_folder)
-                .with_context(|| format!("unable to create {}", email_output_folder.display()))?;
+        let attachments = self.extract_attachments(&parsed, &email_output_folder)?;
+        if attachments.is_empty() {
+            info!("😎 No attachment found [{}]", email_path.display());
+            return Ok(());
+        }
 
-            let attachments = self.extract_attachments(&parsed, &email_output_folder)?;
-            let record = ParsedEmailRecord {
-                parsing_folder: parsing_folder_name,
-                email_folder: email_stem.clone(),
-                email_file_name: email_path
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                message_id: first_header(&parsed, "Message-ID"),
-                subject: normalize_subject(first_header(&parsed, "Subject").unwrap_or_default()),
-                expedition_date: parse_iso_timestamp(first_header(&parsed, "Date")),
-                author: parse_single_contact(first_header(&parsed, "From")),
-                targets: parse_contact_list(first_header(&parsed, "To")),
-                cc: parse_contact_list(first_header(&parsed, "Cc")),
-                bcc: parse_contact_list(first_header(&parsed, "Bcc")),
-                attachments: attachments
-                    .iter()
-                    .map(|attachment| AttachmentRecord {
-                        original_name: attachment.record.original_name.clone(),
-                        mime_type: attachment.record.mime_type.clone(),
-                        size: attachment.record.size,
-                        md5: attachment.record.md5.clone(),
-                        extracted_text: attachment.record.extracted_text.clone(),
-                        extracted_text_method: attachment.record.extracted_text_method.clone(),
-                        extracted_text_truncated: attachment.record.extracted_text_truncated,
-                    })
-                    .collect(),
-            };
+        let context = ParsedEmailContext {
+            parsing_folder: parsing_folder_name,
+            email_folder: email_stem.clone(),
+            email_file_name: email_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_string(),
+            message_id: first_header(&parsed, "Message-ID"),
+            subject: normalize_subject(first_header(&parsed, "Subject").unwrap_or_default()),
+            expedition_date: parse_iso_timestamp(first_header(&parsed, "Date")),
+            author: parse_single_contact(first_header(&parsed, "From")),
+            targets: parse_contact_list(first_header(&parsed, "To")),
+            cc: parse_contact_list(first_header(&parsed, "Cc")),
+            bcc: parse_contact_list(first_header(&parsed, "Bcc")),
+        };
 
-            let payload = serde_json::to_string_pretty(&record)?;
-            let json_path = email_output_folder.join(format!("{}.json", email_stem));
-            fs::write(&json_path, &payload)
-                .with_context(|| format!("unable to write {}", json_path.display()))?;
-            self.write_email_xml(&parsed, &email_output_folder, &record, &payload)?;
-            self.embed_metadata_into_attachments(&attachments, &json_path)?;
+        let mut written_sidecars = 0usize;
+        for attachment in &attachments {
+            match self.write_attachment_bundle(&parsed, &email_output_folder, &context, attachment) {
+                Ok(()) => written_sidecars += 1,
+                Err(error) => warn!(
+                    "💣 Unable to write attachment metadata [{} / {}]: {error:#}",
+                    email_path.display(),
+                    attachment.record.original_name
+                ),
+            }
+        }
 
-            Ok(())
-        })();
-
-        if let Err(error) = parse_result {
+        if written_sidecars == 0 {
             self.cleanup_failed_email_folder(&email_output_folder);
-            return Err(error);
+            anyhow::bail!(
+                "no attachment metadata bundle could be written for {}",
+                email_path.display()
+            );
+        }
+
+        Ok(())
+    }
+
+    fn write_attachment_bundle(
+        &self,
+        parsed: &ParsedMail<'_>,
+        email_output_folder: &Path,
+        context: &ParsedEmailContext,
+        attachment: &ExtractedAttachment,
+    ) -> Result<()> {
+        fs::create_dir_all(email_output_folder)
+            .with_context(|| format!("unable to create {}", email_output_folder.display()))?;
+
+        let record = ParsedEmailRecord {
+            parsing_folder: context.parsing_folder.clone(),
+            email_folder: context.email_folder.clone(),
+            email_file_name: context.email_file_name.clone(),
+            message_id: context.message_id.clone(),
+            subject: context.subject.clone(),
+            expedition_date: context.expedition_date.clone(),
+            author: context.author.clone(),
+            targets: context.targets.clone(),
+            cc: context.cc.clone(),
+            bcc: context.bcc.clone(),
+            attachments: vec![attachment.record.clone()],
+        };
+
+        let payload = serde_json::to_string_pretty(&record)?;
+        let stem = attachment_bundle_stem(&attachment.record.original_name);
+        let json_path = email_output_folder.join(format!("{}.json", stem));
+        fs::write(&json_path, &payload)
+            .with_context(|| format!("unable to write {}", json_path.display()))?;
+        self.write_email_xml(parsed, email_output_folder, &record, &payload, &stem)?;
+        if let Err(error) = self.embed_metadata_into_attachment(attachment, &json_path) {
+            warn!(
+                "💣 Unable to embed custom metadata into attachment [{}]: {error:#}",
+                attachment.record.original_name
+            );
         }
 
         Ok(())
@@ -233,34 +281,74 @@ impl BackupParser {
     ) -> Result<()> {
         if part.subparts.is_empty() {
             if let Some(file_name) = attachment_name(part) {
-                let bytes = part.get_body_raw()?;
-                if should_skip_embedded_image(part, bytes.len()) {
-                    info!("😎 Skip embedded image [{}]", file_name);
-                    return Ok(());
-                }
-
-                fs::create_dir_all(attachments_folder).with_context(|| {
-                    format!("unable to create {}", attachments_folder.display())
-                })?;
                 let safe_name = sanitize_filename(&file_name);
                 let final_name = if safe_name.is_empty() {
                     "attachment.bin".to_string()
                 } else {
                     safe_name
                 };
-                let target_path = make_unique_path(attachments_folder.join(final_name));
-                fs::write(&target_path, &bytes)
-                    .with_context(|| format!("unable to write {}", target_path.display()))?;
+                match part.get_body_raw() {
+                    Ok(bytes) => {
+                        if should_skip_embedded_image(part, bytes.len()) {
+                            info!("😎 Skip embedded image [{}]", file_name);
+                            return Ok(());
+                        }
 
-                attachments.push(ExtractedAttachment {
-                    path: target_path.clone(),
-                    record: self.build_attachment_record(
-                        &target_path,
-                        bytes.len(),
-                        &part.ctype.mimetype,
-                        &bytes,
-                    ),
-                });
+                        fs::create_dir_all(attachments_folder).with_context(|| {
+                            format!("unable to create {}", attachments_folder.display())
+                        })?;
+                        let target_path = make_unique_path(attachments_folder.join(&final_name));
+                        if let Err(error) = fs::write(&target_path, &bytes)
+                            .with_context(|| format!("unable to write {}", target_path.display()))
+                        {
+                            warn!(
+                                "💣 Unable to persist attachment bytes [{}]: {error:#}",
+                                target_path.display()
+                            );
+                            attachments.push(ExtractedAttachment {
+                                path: None,
+                                record: self.build_attachment_record(
+                                    &final_name,
+                                    None,
+                                    bytes.len(),
+                                    &part.ctype.mimetype,
+                                    Some(&bytes),
+                                ),
+                            });
+                            return Ok(());
+                        }
+
+                        attachments.push(ExtractedAttachment {
+                            path: Some(target_path.clone()),
+                            record: self.build_attachment_record(
+                                target_path
+                                    .file_name()
+                                    .and_then(|value| value.to_str())
+                                    .unwrap_or(&final_name),
+                                Some(&target_path),
+                                bytes.len(),
+                                &part.ctype.mimetype,
+                                Some(&bytes),
+                            ),
+                        });
+                    }
+                    Err(error) => {
+                        warn!(
+                            "💣 Unable to extract attachment body [{}]: {error:#}",
+                            final_name
+                        );
+                        attachments.push(ExtractedAttachment {
+                            path: None,
+                            record: self.build_attachment_record(
+                                &final_name,
+                                None,
+                                0,
+                                &part.ctype.mimetype,
+                                None,
+                            ),
+                        });
+                    }
+                }
             }
             return Ok(());
         }
@@ -274,33 +362,36 @@ impl BackupParser {
 
     fn build_attachment_record(
         &self,
-        path: &Path,
+        file_name: &str,
+        path: Option<&Path>,
         size: usize,
         mime_type: &str,
-        bytes: &[u8],
+        bytes: Option<&[u8]>,
     ) -> AttachmentRecord {
         let mut record = AttachmentRecord {
-            original_name: path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or_default()
-                .to_string(),
+            original_name: file_name.to_string(),
             mime_type: mime_type.to_string(),
             size,
-            md5: format!("{:x}", md5::compute(bytes)),
+            md5: bytes
+                .map(|value| format!("{:x}", md5::compute(value)))
+                .unwrap_or_default(),
             extracted_text: None,
             extracted_text_method: None,
             extracted_text_truncated: None,
         };
 
-        let is_pdf = path
+        let is_pdf = Path::new(file_name)
             .extension()
             .and_then(|value| value.to_str())
             .map(|value| value.eq_ignore_ascii_case("pdf"))
             .unwrap_or(false);
-        if !is_pdf {
+        if !is_pdf || bytes.is_none() {
             return record;
         }
+
+        let Some(path) = path else {
+            return record;
+        };
 
         match extract_pdf_text(path) {
             Ok(Some(extraction)) => {
@@ -317,30 +408,31 @@ impl BackupParser {
                 info!("😎 No PDF text extracted [{}]", path.display());
             }
             Err(error) => {
-                warn!("💣 PDF text extraction failed [{}]: {error:#}", path.display());
+                warn!(
+                    "💣 PDF text extraction failed [{}]: {error:#}",
+                    path.display()
+                );
             }
         }
 
         record
     }
 
-    fn embed_metadata_into_attachments(
+    fn embed_metadata_into_attachment(
         &self,
-        attachments: &[ExtractedAttachment],
+        attachment: &ExtractedAttachment,
         json_path: &Path,
     ) -> Result<()> {
+        let Some(path) = attachment.path.as_deref() else {
+            return Ok(());
+        };
+
         let payload = fs::read_to_string(json_path)
             .with_context(|| format!("unable to read {}", json_path.display()))?;
 
-        for attachment in attachments {
-            if attachment.path.is_file() {
-                embed_custom_metadata(&attachment.path, &payload).with_context(|| {
-                    format!(
-                        "unable to inject doka metadata into {}",
-                        attachment.path.display()
-                    )
-                })?;
-            }
+        if path.is_file() {
+            embed_custom_metadata(path, &payload)
+                .with_context(|| format!("unable to inject doka metadata into {}", path.display()))?;
         }
 
         Ok(())
@@ -352,6 +444,7 @@ impl BackupParser {
         email_output_folder: &Path,
         record: &ParsedEmailRecord,
         json_payload: &str,
+        stem: &str,
     ) -> Result<()> {
         let mut xml = String::new();
         xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
@@ -376,7 +469,7 @@ impl BackupParser {
         xml.push_str("  </mime-structure>\n");
         xml.push_str("</email-content>\n");
 
-        let xml_path = email_output_folder.join(format!("{}.xml", record.email_folder));
+        let xml_path = email_output_folder.join(format!("{}.xml", stem));
         fs::write(&xml_path, xml).with_context(|| format!("unable to write {}", xml_path.display()))
     }
 
@@ -396,6 +489,16 @@ impl BackupParser {
             ),
         }
     }
+}
+
+fn attachment_bundle_stem(file_name: &str) -> String {
+    Path::new(file_name)
+        .file_stem()
+        .or_else(|| Path::new(file_name).file_name())
+        .and_then(|value| value.to_str())
+        .map(sanitize_filename)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "attachment".to_string())
 }
 
 fn first_header(parsed: &ParsedMail<'_>, header: &str) -> Option<String> {

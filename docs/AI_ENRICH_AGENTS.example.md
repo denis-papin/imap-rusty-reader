@@ -42,9 +42,9 @@ Utiliser uniquement `HAUTE` ou `BASSE`.
 
 ## Classification Rules
 
-- Choisir exactement un `main_folder`.
-- Choisir exactement un `sub_folder`.
-- Le `sub_folder` doit etre compatible avec le `main_folder`.
+- Choisir exactement un `main_folder` pour chaque piece jointe.
+- Choisir exactement un `sub_folder` pour chaque piece jointe.
+- Le `sub_folder` doit etre compatible avec le `main_folder` choisi pour cette piece jointe.
 - Choisir `DENIS` pour les documents personnels de vie courante : assurance, Audi, banque, factures, impots, legal, retraite, salaires, sante et securite sociale.
 - Choisir `ISD` pour tout ce qui concerne l'activite InSoft Design, y compris i-smile, doka, doka one et Klyrio.
 - Choisir `SCI_LES_ROSES` pour tout ce qui concerne la SCI Les Roses, l'immobilier locatif, les assurances, la banque, les factures, les impots, Kara, la location, les taxes, la Villa 2 et le legal lie a ce patrimoine.
@@ -95,7 +95,7 @@ Utiliser uniquement `HAUTE` ou `BASSE`.
 ```json
 {
   "type": "object",
-  "required": ["email_summary", "email_importance", "main_folder", "sub_folder", "attachment_summaries"],
+  "required": ["email_summary", "email_importance", "attachment_summaries"],
   "properties": {
     "email_summary": {
       "type": "string"
@@ -104,17 +104,11 @@ Utiliser uniquement `HAUTE` ou `BASSE`.
       "type": "string",
       "enum": ["HAUTE", "BASSE"]
     },
-    "main_folder": {
-      "type": "string"
-    },
-    "sub_folder": {
-      "type": "string"
-    },
     "attachment_summaries": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["file_name", "mime_type", "summary", "confidence", "importance", "proposed_file_name"],
+        "required": ["file_name", "mime_type", "summary", "importance", "proposed_file_name", "main_folder", "sub_folder"],
         "properties": {
           "file_name": {
             "type": "string"
@@ -125,14 +119,17 @@ Utiliser uniquement `HAUTE` ou `BASSE`.
           "summary": {
             "type": "string"
           },
-          "confidence": {
-            "type": ["number", "null"]
-          },
           "importance": {
             "type": "string",
             "enum": ["HAUTE", "BASSE"]
           },
           "proposed_file_name": {
+            "type": "string"
+          },
+          "main_folder": {
+            "type": "string"
+          },
+          "sub_folder": {
             "type": "string"
           }
         }
@@ -148,16 +145,15 @@ Utiliser uniquement `HAUTE` ou `BASSE`.
 {
   "email_summary": "facture de gestion locative",
   "email_importance": "HAUTE",
-  "main_folder": "SCI_LES_ROSES",
-  "sub_folder": "LOCATION",
   "attachment_summaries": [
     {
       "file_name": "facture.pdf",
       "mime_type": "application/pdf",
       "summary": "facture de gestion pour la villa 2",
-      "confidence": 0.92,
       "importance": "HAUTE",
-      "proposed_file_name": "2024-03-15 gestion facture villa 2.pdf"
+      "proposed_file_name": "2024-03-15 gestion facture villa 2.pdf",
+      "main_folder": "SCI_LES_ROSES",
+      "sub_folder": "LOCATION"
     }
   ]
 }

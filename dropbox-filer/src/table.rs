@@ -44,7 +44,6 @@ const COLUMN_EMAIL_SUMMARY: &str = "email_summary";
 const COLUMN_EMAIL_IMPORTANCE: &str = "email_importance";
 const COLUMN_ATTACHMENT_SUMMARY: &str = "attachment_summary";
 const COLUMN_ATTACHMENT_IMPORTANCE: &str = "attachment_importance";
-const COLUMN_ATTACHMENT_CONFIDENCE: &str = "attachment_confidence";
 const COLUMN_ATTACHMENT_MIME_TYPE: &str = "attachment_mime_type";
 
 #[derive(Debug, Clone)]
@@ -86,7 +85,6 @@ pub struct ArchiveRecord {
     pub email_importance: String,
     pub attachment_summary: String,
     pub attachment_importance: String,
-    pub attachment_confidence: String,
     pub attachment_mime_type: String,
 }
 
@@ -151,7 +149,12 @@ impl DropboxArchiveTable {
                     .map(|record| record.uploaded_at.clone())
                     .collect(),
             ),
-            large_string_array(self.records.iter().map(|record| record.md5.clone()).collect()),
+            large_string_array(
+                self.records
+                    .iter()
+                    .map(|record| record.md5.clone())
+                    .collect(),
+            ),
             large_string_array(
                 self.records
                     .iter()
@@ -317,12 +320,6 @@ impl DropboxArchiveTable {
             large_string_array(
                 self.records
                     .iter()
-                    .map(|record| record.attachment_confidence.clone())
-                    .collect(),
-            ),
-            large_string_array(
-                self.records
-                    .iter()
                     .map(|record| record.attachment_mime_type.clone())
                     .collect(),
             ),
@@ -408,7 +405,6 @@ fn read_batch(batch: &RecordBatch) -> Result<Vec<ArchiveRecord>> {
     let email_importance = column_values(batch, COLUMN_EMAIL_IMPORTANCE)?;
     let attachment_summary = column_values(batch, COLUMN_ATTACHMENT_SUMMARY)?;
     let attachment_importance = column_values(batch, COLUMN_ATTACHMENT_IMPORTANCE)?;
-    let attachment_confidence = column_values(batch, COLUMN_ATTACHMENT_CONFIDENCE)?;
     let attachment_mime_type = column_values(batch, COLUMN_ATTACHMENT_MIME_TYPE)?;
 
     let mut records = Vec::with_capacity(batch.num_rows());
@@ -444,7 +440,6 @@ fn read_batch(batch: &RecordBatch) -> Result<Vec<ArchiveRecord>> {
             email_importance: email_importance[index].clone(),
             attachment_summary: attachment_summary[index].clone(),
             attachment_importance: attachment_importance[index].clone(),
-            attachment_confidence: attachment_confidence[index].clone(),
             attachment_mime_type: attachment_mime_type[index].clone(),
         });
     }
@@ -459,9 +454,8 @@ fn column_values(batch: &RecordBatch, name: &str) -> Result<Vec<String>> {
     let column = batch.column(index);
     (0..column.len())
         .map(|row| {
-            array_value_to_string(column.as_ref(), row).with_context(|| {
-                format!("unable to decode parquet value `{name}` at row {row}")
-            })
+            array_value_to_string(column.as_ref(), row)
+                .with_context(|| format!("unable to decode parquet value `{name}` at row {row}"))
         })
         .collect()
 }
@@ -499,7 +493,6 @@ fn table_schema() -> Arc<Schema> {
             COLUMN_EMAIL_IMPORTANCE,
             COLUMN_ATTACHMENT_SUMMARY,
             COLUMN_ATTACHMENT_IMPORTANCE,
-            COLUMN_ATTACHMENT_CONFIDENCE,
             COLUMN_ATTACHMENT_MIME_TYPE,
         ]
         .into_iter()
@@ -556,7 +549,6 @@ mod tests {
                 email_importance: "HAUTE".to_string(),
                 attachment_summary: "Piece jointe".to_string(),
                 attachment_importance: "HAUTE".to_string(),
-                attachment_confidence: "0.99".to_string(),
                 attachment_mime_type: "application/pdf".to_string(),
             })
             .unwrap();

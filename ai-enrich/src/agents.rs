@@ -26,7 +26,9 @@ pub fn load_agents_spec(path: &Path) -> Result<AgentsSpec> {
         &["Output JSON Schema", "JSON Schema", "Output Schema"],
     )?;
     let output_schema = match parsed_schema {
-        Some(value) => inject_folder_enums_and_harden(value, &folder_taxonomy),
+        Some(value) => {
+            inject_folder_enums_and_harden(normalize_output_schema(value), &folder_taxonomy)
+        }
         None => default_output_schema(&folder_taxonomy),
     };
 
@@ -125,7 +127,7 @@ fn default_output_schema(folder_taxonomy: &BTreeMap<String, Vec<String>>) -> Val
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["email_summary", "email_importance", "main_folder", "sub_folder", "attachment_summaries"],
+        "required": ["email_summary", "email_importance", "attachment_summaries"],
         "properties": {
             "email_summary": {
                 "type": "string",
@@ -136,37 +138,78 @@ fn default_output_schema(folder_taxonomy: &BTreeMap<String, Vec<String>>) -> Val
                 "enum": IMPORTANCE_VALUES,
                 "description": "Whether the email itself is important over time."
             },
-            "main_folder": {
-                "type": "string",
-                "enum": main_folders,
-                "description": "First-level filing folder."
-            },
-            "sub_folder": {
-                "type": "string",
-                "enum": sub_folders,
-                "description": "Second-level filing folder valid for the selected main folder."
-            },
             "attachment_summaries": {
                 "type": "array",
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["file_name", "mime_type", "summary", "confidence", "importance", "proposed_file_name"],
+                    "required": ["file_name", "mime_type", "summary", "importance", "proposed_file_name", "main_folder", "sub_folder"],
                     "properties": {
                         "file_name": { "type": "string" },
                         "mime_type": { "type": ["string", "null"] },
                         "summary": { "type": "string" },
-                        "confidence": { "type": ["number", "null"] },
                         "importance": { "type": "string", "enum": IMPORTANCE_VALUES },
                         "proposed_file_name": {
                             "type": "string",
                             "description": "Suggested attachment filename using the format yyyy-mm-dd <emetteur-short> <motif> while preserving the original extension when known."
+                        },
+                        "main_folder": {
+                            "type": "string",
+                            "enum": main_folders,
+                            "description": "First-level filing folder for this attachment."
+                        },
+                        "sub_folder": {
+                            "type": "string",
+                            "enum": sub_folders,
+                            "description": "Second-level filing folder valid for the selected main folder for this attachment."
                         }
                     }
                 }
             }
         }
     })
+}
+
+fn normalize_output_schema(mut schema: Value) -> Value {
+    let top_level_main_folder = schema.pointer("/properties/main_folder").cloned();
+    let top_level_sub_folder = schema.pointer("/properties/sub_folder").cloned();
+
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        properties.remove("main_folder");
+        properties.remove("sub_folder");
+    }
+
+    if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) {
+        required.retain(|value| {
+            value.as_str() != Some("main_folder") && value.as_str() != Some("sub_folder")
+        });
+    }
+
+    let Some(item_properties) = schema
+        .pointer_mut("/properties/attachment_summaries/items/properties")
+        .and_then(Value::as_object_mut)
+    else {
+        return schema;
+    };
+
+    item_properties.remove("confidence");
+    item_properties
+        .entry("main_folder".to_string())
+        .or_insert_with(|| top_level_main_folder.unwrap_or_else(|| json!({ "type": "string" })));
+    item_properties
+        .entry("sub_folder".to_string())
+        .or_insert_with(|| top_level_sub_folder.unwrap_or_else(|| json!({ "type": "string" })));
+
+    if let Some(required) = schema
+        .pointer_mut("/properties/attachment_summaries/items/required")
+        .and_then(Value::as_array_mut)
+    {
+        required.retain(|value| value.as_str() != Some("confidence"));
+        ensure_required_field(required, "main_folder");
+        ensure_required_field(required, "sub_folder");
+    }
+
+    schema
 }
 
 fn inject_folder_enums_and_harden(
@@ -176,18 +219,21 @@ fn inject_folder_enums_and_harden(
     harden_objects(&mut schema);
     let main_folders = folder_taxonomy.keys().cloned().collect::<Vec<_>>();
     let sub_folders = all_subfolders(folder_taxonomy);
-
-    if let Some(main_folder) = schema.pointer_mut("/properties/main_folder") {
-        if let Some(items) = main_folder.as_object_mut() {
-            items.insert("enum".to_string(), json!(main_folders));
-        }
-    }
     if let Some(email_importance) = schema.pointer_mut("/properties/email_importance") {
         if let Some(items) = email_importance.as_object_mut() {
             items.insert("enum".to_string(), json!(IMPORTANCE_VALUES));
         }
     }
-    if let Some(sub_folder) = schema.pointer_mut("/properties/sub_folder") {
+    if let Some(main_folder) =
+        schema.pointer_mut("/properties/attachment_summaries/items/properties/main_folder")
+    {
+        if let Some(items) = main_folder.as_object_mut() {
+            items.insert("enum".to_string(), json!(main_folders));
+        }
+    }
+    if let Some(sub_folder) =
+        schema.pointer_mut("/properties/attachment_summaries/items/properties/sub_folder")
+    {
         if let Some(items) = sub_folder.as_object_mut() {
             items.insert("enum".to_string(), json!(sub_folders));
         }
@@ -199,7 +245,59 @@ fn inject_folder_enums_and_harden(
             items.insert("enum".to_string(), json!(IMPORTANCE_VALUES));
         }
     }
+    inject_attachment_pair_constraints(&mut schema, folder_taxonomy);
     schema
+}
+
+fn inject_attachment_pair_constraints(
+    schema: &mut Value,
+    folder_taxonomy: &BTreeMap<String, Vec<String>>,
+) {
+    let Some(item_schema) = schema
+        .pointer("/properties/attachment_summaries/items")
+        .cloned()
+    else {
+        return;
+    };
+    let item_properties = item_schema
+        .get("properties")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let item_required = item_schema
+        .get("required")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+
+    let constraints = folder_taxonomy
+        .iter()
+        .map(|(main_folder, subfolders)| {
+            let mut branch_properties = item_properties.clone();
+            if let Some(properties) = branch_properties.as_object_mut() {
+                properties.insert("main_folder".to_string(), json!({ "enum": [main_folder] }));
+                properties.insert("sub_folder".to_string(), json!({ "enum": subfolders }));
+            }
+
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": item_required,
+                "properties": branch_properties
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if let Some(item_schema) = schema.pointer_mut("/properties/attachment_summaries/items")
+        && let Some(item_object) = item_schema.as_object_mut()
+    {
+        item_object.insert("anyOf".to_string(), Value::Array(constraints));
+        item_object.remove("allOf");
+    }
+}
+
+fn ensure_required_field(required: &mut Vec<Value>, field: &str) {
+    if !required.iter().any(|value| value.as_str() == Some(field)) {
+        required.push(Value::String(field.to_string()));
+    }
 }
 
 fn all_subfolders(folder_taxonomy: &BTreeMap<String, Vec<String>>) -> Vec<String> {
@@ -363,8 +461,16 @@ mod tests {
             "type": "object",
             "properties": {
                 "email_importance": { "type": "string" },
-                "main_folder": { "type": "string" },
-                "sub_folder": { "type": "string" }
+                "attachment_summaries": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "main_folder": { "type": "string" },
+                            "sub_folder": { "type": "string" }
+                        }
+                    }
+                }
             }
         });
 
@@ -383,16 +489,82 @@ mod tests {
             &serde_json::json!(["HAUTE", "BASSE"])
         );
         assert_eq!(
-            hardened.pointer("/properties/main_folder/enum").unwrap(),
+            hardened
+                .pointer("/properties/attachment_summaries/items/properties/main_folder/enum")
+                .unwrap(),
             &serde_json::json!(["DENIS", "TRAVAIL"])
         );
         assert_eq!(
             hardened.get("additionalProperties").unwrap(),
             &Value::Bool(false)
         );
-        assert_eq!(
-            hardened.get("required").unwrap(),
-            &serde_json::json!(["email_importance", "main_folder", "sub_folder"])
+        let required = hardened.get("required").and_then(Value::as_array).unwrap();
+        assert_eq!(required.len(), 2);
+        assert!(
+            required
+                .iter()
+                .any(|value| value.as_str() == Some("attachment_summaries"))
+        );
+        assert!(
+            required
+                .iter()
+                .any(|value| value.as_str() == Some("email_importance"))
+        );
+    }
+
+    #[test]
+    fn migrates_legacy_top_level_classification_to_attachment_level() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["main_folder", "sub_folder", "attachment_summaries"],
+            "properties": {
+                "main_folder": {
+                    "type": "string"
+                },
+                "sub_folder": {
+                    "type": "string"
+                },
+                "attachment_summaries": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["file_name", "confidence"],
+                        "properties": {
+                            "file_name": { "type": "string" },
+                            "confidence": { "type": "number" }
+                        }
+                    }
+                }
+            }
+        });
+
+        let normalized = normalize_output_schema(schema);
+        assert!(normalized.pointer("/properties/main_folder").is_none());
+        assert!(normalized.pointer("/properties/sub_folder").is_none());
+        assert!(
+            normalized
+                .pointer("/properties/attachment_summaries/items/properties/confidence")
+                .is_none()
+        );
+        let required = normalized
+            .pointer("/properties/attachment_summaries/items/required")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert_eq!(required.len(), 3);
+        assert!(
+            required
+                .iter()
+                .any(|value| value.as_str() == Some("file_name"))
+        );
+        assert!(
+            required
+                .iter()
+                .any(|value| value.as_str() == Some("main_folder"))
+        );
+        assert!(
+            required
+                .iter()
+                .any(|value| value.as_str() == Some("sub_folder"))
         );
     }
 
@@ -406,7 +578,7 @@ mod tests {
                     "required": ["file_name"],
                     "properties": {
                         "file_name": { "type": "string" },
-                        "confidence": { "type": "number" }
+                        "main_folder": { "type": "string" }
                     }
                 }
             }
@@ -417,15 +589,59 @@ mod tests {
             vec!["LEGAL".to_string(), "FACTURES".to_string()],
         )]);
         let hardened = inject_folder_enums_and_harden(schema, &taxonomy);
-        assert_eq!(
-            hardened.pointer("/properties/attachment/required").unwrap(),
-            &serde_json::json!(["confidence", "file_name"])
+        let required = hardened
+            .pointer("/properties/attachment/required")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert_eq!(required.len(), 2);
+        assert!(
+            required
+                .iter()
+                .any(|value| value.as_str() == Some("file_name"))
+        );
+        assert!(
+            required
+                .iter()
+                .any(|value| value.as_str() == Some("main_folder"))
         );
         assert_eq!(
             hardened
-                .pointer("/properties/attachment/properties/confidence/type")
+                .pointer("/properties/attachment/properties/main_folder/type")
                 .unwrap(),
-            &serde_json::json!(["number", "null"])
+            &serde_json::json!(["string", "null"])
         );
+    }
+
+    #[test]
+    fn injects_pair_constraints_for_attachment_taxonomy() {
+        let taxonomy = BTreeMap::from([
+            (
+                "DENIS".to_string(),
+                vec!["AUDI".to_string(), "LEGAL".to_string()],
+            ),
+            (
+                "SCI_LES_ROSES".to_string(),
+                vec!["LOCATION".to_string(), "LEGAL".to_string()],
+            ),
+        ]);
+        let schema = default_output_schema(&taxonomy);
+        let hardened = inject_folder_enums_and_harden(schema, &taxonomy);
+
+        let any_of = hardened
+            .pointer("/properties/attachment_summaries/items/anyOf")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert_eq!(any_of.len(), 2);
+        assert!(any_of.iter().any(|entry| {
+            entry.pointer("/properties/main_folder/enum") == Some(&json!(["DENIS"]))
+                && entry.pointer("/properties/sub_folder/enum") == Some(&json!(["AUDI", "LEGAL"]))
+                && entry.pointer("/additionalProperties") == Some(&json!(false))
+        }));
+        assert!(any_of.iter().any(|entry| {
+            entry.pointer("/properties/main_folder/enum") == Some(&json!(["SCI_LES_ROSES"]))
+                && entry.pointer("/properties/sub_folder/enum")
+                    == Some(&json!(["LOCATION", "LEGAL"]))
+                && entry.pointer("/additionalProperties") == Some(&json!(false))
+        }));
     }
 }

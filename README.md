@@ -6,7 +6,7 @@ Ce dépôt est maintenant un workspace Cargo avec quatre programmes :
 - `imap-rusty-reader` : lit un ou plusieurs comptes IMAP et sauvegarde les emails au format `.eml`
 - `parse-ia` : relit les `.eml` déjà sauvegardés, extrait les métadonnées et les pièces jointes dans un dossier configuré par `parseIaFolder`
 - `ai-enrich` : relit les dossiers produits par `parse-ia`, appelle OpenAI et écrit un JSON enrichi conforme à un schéma défini par `AGENTS.md`
-- `dropbox-filer` : relit les dossiers produits par `parse-ia` et `ai-enrich`, puis range les pièces jointes dans Dropbox selon `main_folder`, `sub_folder` et `proposed_file_name`
+- `dropbox-filer` : relit les dossiers produits par `parse-ia` et `ai-enrich`, puis range les pièces jointes dans Dropbox selon le `main_folder`, le `sub_folder` et le `proposed_file_name` de chaque pièce jointe
 
 `imap-rusty-reader` est une réécriture Rust moderne du projet Java `imap-reader`.
 
@@ -203,7 +203,7 @@ Par défaut :
 - les pièces jointes texte sont injectées sous forme de texte
 - les PDF sont extraits côté `parse-ia` et `ai-enrich` réutilise ce texte ; le PDF brut n’est plus envoyé à OpenAI
 - les images brutes sont désactivées sauf si `aiSendRawImages: true`
-- la sortie IA recommande un classement hiérarchique avec `main_folder` puis `sub_folder`
+- la sortie IA classe chaque pièce jointe avec son propre couple `main_folder` / `sub_folder`
 - `ai-enrich` envoie une `prompt_cache_key` stable pour favoriser le prompt caching sur les instructions communes
 
 ### Lancer ai-enrich
@@ -227,7 +227,7 @@ OPENAI_API_KEY=... cargo run -p ai-enrich -- /chemin/vers/config.yml --agents /c
 La section `Folder Taxonomy` doit contenir un objet JSON associant chaque dossier de niveau 1 à la liste de ses sous-dossiers autorisés.
 
 La section `Output JSON Schema` doit contenir un bloc JSON décrivant l’objet de sortie attendu.
-Le code réinjecte automatiquement les valeurs autorisées dans `main_folder` et `sub_folder`, puis vérifie que le sous-dossier choisi est compatible avec le dossier principal.
+Le code réinjecte automatiquement les valeurs autorisées dans `attachment_summaries[].main_folder` et `attachment_summaries[].sub_folder`, supprime l’ancien champ `confidence` et migre aussi les anciens schémas qui plaçaient encore ces tags à la racine.
 
 Un exemple complet est fourni dans :
 - `docs/AI_ENRICH_AGENTS.example.md`
@@ -245,12 +245,11 @@ il :
 - n’écrit plus dans le dossier final suggéré, mais dépose tout dans `/<racine>/A_TRAITER/`
 - renomme le fichier avec `proposed_file_name`
 - réapplique l’extension d’origine si besoin
-- génère aussi un fichier XML compagnon du même nom logique, avec extension `.xml`
-- enrichit ce XML avec une balise `<ai-enrich><![CDATA[...]]></ai-enrich>` contenant le JSON brut de `<email>.ai.json`
+- génère aussi un fichier XML compagnon qui prend exactement le même nom cible que la pièce jointe, avec extension `.xml`
+- enrichit ce XML avec une balise `<ai-enrich><![CDATA[...]]></ai-enrich>` contenant le JSON normalisé de `<email>.ai.json`
 - crée les dossiers distants manquants via l’API Dropbox
 - uploade le fichier et son XML
-- après un traitement réussi, supprime le dossier email correspondant dans `_parse-ai`
-- après un traitement réussi, supprime aussi le fichier `.eml` source d’origine dans le dossier parent de `_parse-ai`
+- laisse tous les fichiers locaux en place après traitement, y compris les pièces jointes, métadonnées et `.eml` source
 
 Le programme écrit aussi :
 - `dropbox_uploads.parquet` à la racine de `emailFolder` : table Parquet consultable par DataFusion, contenant les fichiers envoyés avec leur MD5, leur nom final, leur checksum Dropbox `content_hash`, leurs tags, le contenu XML enrichi et le contenu `ai.json`
@@ -264,9 +263,11 @@ Par défaut :
 - si le MD5 existe déjà dans la table, `dropbox-filer` liste récursivement les fichiers présents sous la racine Dropbox ciblée et ne saute l’upload que si un fichier distant expose le même `content_hash` que la pièce jointe locale
 - si le MD5 existe dans la table mais qu’aucun fichier distant de même contenu n’est retrouvé, le fichier est renvoyé vers Dropbox et une nouvelle ligne est ajoutée à la table Parquet
 - le chemin cible suit la forme `/<racine>/A_TRAITER/<proposed_file_name>` et `/<racine>/A_TRAITER/<proposed_file_name sans extension>.xml`
+- le JSON IA embarqué dans le XML compagnon est normalisé par pièce jointe, même si le fichier source utilisait encore l’ancien format avec `main_folder` et `sub_folder` à la racine
 - le programme échoue si `ai-enrich` n’a pas produit une suggestion de nom pour chaque pièce jointe présente
 - `dropbox-filer` rafraîchit un access token court au démarrage quand il reçoit app key + app secret + refresh token
-- en `--dry-run`, aucun upload ni nettoyage local n’est effectué
+- en `--dry-run`, aucun upload n’est effectué
+- hors `--dry-run`, `dropbox-filer` n’effectue plus aucun nettoyage ni suppression locale automatique
 
 ### Lancer dropbox-filer
 ```bash

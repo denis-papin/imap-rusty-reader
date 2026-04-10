@@ -232,8 +232,8 @@ impl DropboxClient {
     }
 
     async fn upload_large_file(&self, local_path: &Path, remote_path: &str) -> Result<()> {
-        let mut file =
-            File::open(local_path).with_context(|| format!("unable to open {}", local_path.display()))?;
+        let mut file = File::open(local_path)
+            .with_context(|| format!("unable to open {}", local_path.display()))?;
         let mut buffer = vec![0u8; UPLOAD_SESSION_CHUNK_BYTES];
         let mut bytes_read = file
             .read(&mut buffer)
@@ -254,7 +254,12 @@ impl DropboxClient {
             .body(buffer)
             .send()
             .await
-            .with_context(|| format!("unable to start upload session for {}", local_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "unable to start upload session for {}",
+                    local_path.display()
+                )
+            })?;
         let status = start_response.status();
         let body = start_response.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -353,7 +358,11 @@ impl DropboxClient {
         bail!("upload session finished without final commit for `{remote_path}`");
     }
 
-    async fn ensure_upload_success(&self, response: reqwest::Response, remote_path: &str) -> Result<()> {
+    async fn ensure_upload_success(
+        &self,
+        response: reqwest::Response,
+        remote_path: &str,
+    ) -> Result<()> {
         if response.status().is_success() {
             return Ok(());
         }
