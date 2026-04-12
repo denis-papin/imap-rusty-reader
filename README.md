@@ -260,8 +260,8 @@ Par défaut :
 - la racine Dropbox est lue depuis `dropboxRootFolder`
 - un `--root` peut surcharger cette racine au lancement
 - avant chaque upload, `dropbox-filer` vérifie la table Parquet par MD5
-- si le MD5 existe déjà dans la table, `dropbox-filer` liste récursivement les fichiers présents sous la racine Dropbox ciblée et ne saute l’upload que si un fichier distant expose le même `content_hash` que la pièce jointe locale
-- si le MD5 existe dans la table mais qu’aucun fichier distant de même contenu n’est retrouvé, le fichier est renvoyé vers Dropbox et une nouvelle ligne est ajoutée à la table Parquet
+- si le MD5 existe déjà dans la table, `dropbox-filer` liste récursivement les fichiers présents sous la racine Dropbox ciblée, télécharge les XML dont le nom commence comme le XML compagnon cible, puis ne saute l’upload que si le JSON de parsing embarqué contient le même MD5 que la pièce jointe locale
+- si le MD5 existe dans la table mais qu’aucun XML Dropbox similaire ne confirme ce MD5, le fichier est renvoyé vers Dropbox et une nouvelle ligne est ajoutée à la table Parquet
 - le chemin cible suit la forme `/<racine>/A_TRAITER/<proposed_file_name>` et `/<racine>/A_TRAITER/<proposed_file_name sans extension>.xml`
 - le JSON IA embarqué dans le XML compagnon est normalisé par pièce jointe, même si le fichier source utilisait encore l’ancien format avec `main_folder` et `sub_folder` à la racine
 - le programme échoue si `ai-enrich` n’a pas produit une suggestion de nom pour chaque pièce jointe présente

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -121,7 +121,7 @@ struct ErrorFile {
 
 #[derive(Debug, Default, Clone)]
 struct DropboxRemoteIndex {
-    paths_by_content_hash: HashMap<String, Vec<String>>,
+    files: Vec<DropboxRemoteFile>,
 }
 
 impl DropboxFiler {
@@ -277,20 +277,20 @@ impl DropboxFiler {
 
         info!("📦 File attachments to Dropbox [{}]", job.folder.display());
 
-        let dropbox_content_hash = compute_dropbox_content_hash(&plan.local_path)?;
         if archive.contains_md5(&plan.md5) {
-            if let Some(existing_paths) = remote_index.paths_for_content_hash(&dropbox_content_hash)
+            if let Some(existing_xml_path) =
+                find_remote_xml_with_matching_md5(client, remote_index, &plan).await?
             {
                 info!(
-                    "😎 Skip attachment already archived by MD5 + checksum Dropbox [{}] -> [{}]",
+                    "😎 Skip attachment already archived by MD5 found in Dropbox XML [{}] -> [{}]",
                     plan.local_path.display(),
-                    existing_paths[0]
+                    existing_xml_path
                 );
                 return Ok(false);
             }
 
             info!(
-                "😎 MD5 already indexed but no matching checksum found on Dropbox, re-upload [{}] -> [{}]",
+                "😎 MD5 already indexed but no matching Dropbox XML metadata found, re-upload [{}] -> [{}]",
                 plan.local_path.display(),
                 plan.dropbox_path
             );
@@ -306,6 +306,7 @@ impl DropboxFiler {
             return Ok(false);
         }
 
+        let dropbox_content_hash = compute_dropbox_content_hash(&plan.local_path)?;
         client.ensure_parent_folders(&plan.dropbox_path).await?;
         client
             .upload_file(&plan.local_path, &plan.dropbox_path)
@@ -617,22 +618,137 @@ impl DropboxRemoteIndex {
     }
 
     fn add_file(&mut self, path: String, content_hash: String) {
-        self.paths_by_content_hash
-            .entry(content_hash)
-            .or_default()
-            .push(path);
+        self.files.push(DropboxRemoteFile {
+            path_display: path,
+            content_hash,
+        });
     }
 
-    fn paths_for_content_hash(&self, content_hash: &str) -> Option<&Vec<String>> {
-        self.paths_by_content_hash.get(content_hash)
+    fn xml_paths_with_similar_name(&self, xml_file_name: &str) -> Vec<String> {
+        let target_prefix = similar_name_prefix(xml_file_name);
+        if target_prefix.is_empty() {
+            return Vec::new();
+        }
+
+        self.files
+            .iter()
+            .filter_map(|file| {
+                let candidate_name = dropbox_file_name(&file.path_display)?;
+                if !candidate_name.to_ascii_lowercase().ends_with(".xml") {
+                    return None;
+                }
+
+                let candidate = normalized_file_stem_for_similarity(candidate_name);
+                if candidate.starts_with(&target_prefix) {
+                    Some(file.path_display.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     fn len(&self) -> usize {
-        self.paths_by_content_hash
-            .values()
-            .map(|paths| paths.len())
-            .sum()
+        self.files.len()
     }
+}
+
+async fn find_remote_xml_with_matching_md5(
+    client: &DropboxClient,
+    remote_index: &DropboxRemoteIndex,
+    plan: &AttachmentUploadPlan,
+) -> Result<Option<String>> {
+    let xml_paths = remote_index.xml_paths_with_similar_name(&plan.xml_file_name);
+    if xml_paths.is_empty() {
+        info!(
+            "😎 MD5 already indexed but no similarly named Dropbox XML candidate found [{}]",
+            plan.xml_file_name
+        );
+        return Ok(None);
+    }
+
+    info!(
+        "😎 MD5 already indexed, checking {} similarly named Dropbox XML candidate(s) [{}]",
+        xml_paths.len(),
+        plan.xml_file_name
+    );
+    for xml_path in xml_paths {
+        let xml_payload = match client.download_text(&xml_path).await {
+            Ok(payload) => payload,
+            Err(error) => {
+                warn!(
+                    "💣 Unable to read Dropbox XML metadata [{}]: {error:#}",
+                    xml_path
+                );
+                continue;
+            }
+        };
+
+        if xml_payload_contains_parse_md5(&xml_payload, &plan.md5) {
+            return Ok(Some(xml_path));
+        }
+    }
+
+    Ok(None)
+}
+
+fn xml_payload_contains_parse_md5(xml_payload: &str, md5: &str) -> bool {
+    let Some(parse_json_payload) = extract_doka_custom_json(xml_payload) else {
+        return false;
+    };
+    let Ok(parsed) = serde_json::from_str::<ParsedEmailMetadata>(&parse_json_payload) else {
+        return false;
+    };
+
+    parsed
+        .attachments
+        .iter()
+        .any(|attachment| attachment.md5.eq_ignore_ascii_case(md5))
+}
+
+fn extract_doka_custom_json(xml_payload: &str) -> Option<String> {
+    let regex = Regex::new(
+        r#"(?s)<doka-custom\b[^>]*\bformat="json"[^>]*>\s*<!\[CDATA\[(.*?)\]\]>\s*</doka-custom>"#,
+    )
+    .expect("invalid regex");
+    regex
+        .captures(xml_payload)
+        .and_then(|captures| captures.get(1))
+        .map(|value| value.as_str().replace("]]]]><![CDATA[>", "]]>"))
+}
+
+fn dropbox_file_name(path: &str) -> Option<&str> {
+    path.rsplit('/').next().filter(|value| !value.is_empty())
+}
+
+fn similar_name_prefix(file_name: &str) -> String {
+    let normalized = normalized_file_stem_for_similarity(file_name);
+    normalized
+        .chars()
+        .take(24)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn normalized_file_stem_for_similarity(file_name: &str) -> String {
+    let stem = Path::new(file_name)
+        .file_stem()
+        .or_else(|| Path::new(file_name).file_name())
+        .and_then(|value| value.to_str())
+        .unwrap_or(file_name);
+    let mut normalized = String::with_capacity(stem.len());
+    let mut last_was_space = false;
+    for ch in stem.chars().flat_map(char::to_lowercase) {
+        if ch.is_alphanumeric() {
+            normalized.push(ch);
+            last_was_space = false;
+        } else if !last_was_space {
+            normalized.push(' ');
+            last_was_space = true;
+        }
+    }
+    normalized.trim().to_string()
 }
 
 fn embed_ai_payload_in_xml(xml_payload: &str, ai_payload: &str) -> String {
@@ -713,6 +829,7 @@ mod tests {
     use super::{
         AiAttachmentSummary, AiClassification, DropboxRemoteIndex, ParsedAttachment,
         ParsedEmailMetadata, build_upload_plan, normalize_ai_classification,
+        xml_payload_contains_parse_md5,
     };
     use crate::dropbox::DropboxRemoteFile;
 
@@ -762,8 +879,14 @@ mod tests {
             plan.xml_dropbox_path,
             "/Archives/A_TRAITER/2024-03-15 techvalley fin-contrat.xml"
         );
-        assert!(plan.enriched_xml_content.contains("\"main_folder\":\"DENIS\""));
-        assert!(plan.enriched_xml_content.contains("\"sub_folder\":\"LEGAL\""));
+        assert!(
+            plan.enriched_xml_content
+                .contains("\"main_folder\":\"DENIS\"")
+        );
+        assert!(
+            plan.enriched_xml_content
+                .contains("\"sub_folder\":\"LEGAL\"")
+        );
     }
 
     #[test]
@@ -798,22 +921,48 @@ mod tests {
     }
 
     #[test]
-    fn indexes_dropbox_files_by_content_hash() {
+    fn finds_similarly_named_dropbox_xml_files() {
         let index = DropboxRemoteIndex::from_remote_files(vec![
             DropboxRemoteFile {
-                path_display: "/COBRA_TEST/A_TRAITER/a.pdf".to_string(),
-                content_hash: "hash-a".to_string(),
+                path_display: "/COBRA_TEST/A_TRAITER/2024-03-15 techvalley fin-contrat.pdf"
+                    .to_string(),
+                content_hash: "hash-pdf".to_string(),
             },
             DropboxRemoteFile {
-                path_display: "/COBRA_TEST/Archives/a.pdf".to_string(),
-                content_hash: "hash-a".to_string(),
+                path_display: "/COBRA_TEST/Archives/2024-03-15 techvalley fin-contrat signe.xml"
+                    .to_string(),
+                content_hash: "hash-xml".to_string(),
+            },
+            DropboxRemoteFile {
+                path_display: "/COBRA_TEST/Archives/2024-03-16 techvalley fin-contrat.xml"
+                    .to_string(),
+                content_hash: "hash-other".to_string(),
             },
         ]);
 
-        assert_eq!(index.len(), 2);
+        assert_eq!(index.len(), 3);
         assert_eq!(
-            index.paths_for_content_hash("hash-a").map(Vec::len),
-            Some(2)
+            index.xml_paths_with_similar_name("2024-03-15 techvalley fin-contrat.xml"),
+            vec!["/COBRA_TEST/Archives/2024-03-15 techvalley fin-contrat signe.xml".to_string()]
         );
+    }
+
+    #[test]
+    fn reads_parse_md5_from_doka_custom_xml_json() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<email-content>
+  <doka-custom format="json"><![CDATA[{
+    "attachments": [
+      {
+        "original_name": "source.pdf",
+        "mime_type": "application/pdf",
+        "md5": "ABCDEF"
+      }
+    ]
+  }]]></doka-custom>
+</email-content>"#;
+
+        assert!(xml_payload_contains_parse_md5(xml, "abcdef"));
+        assert!(!xml_payload_contains_parse_md5(xml, "other"));
     }
 }

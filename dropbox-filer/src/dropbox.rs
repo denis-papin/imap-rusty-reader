@@ -132,6 +132,34 @@ impl DropboxClient {
         self.ensure_upload_success(response, remote_path).await
     }
 
+    pub async fn download_text(&self, remote_path: &str) -> Result<String> {
+        let arg = escape_non_ascii_json(&serde_json::to_string(&json!({
+            "path": remote_path
+        }))?);
+        let url = format!("{}/2/files/download", self.content_base_url);
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.access_token)
+            .header("Dropbox-API-Arg", arg)
+            .send()
+            .await
+            .with_context(|| format!("unable to download {remote_path}"))?;
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            bail!(
+                "dropbox download failed [{}] status {}: {}",
+                remote_path,
+                status,
+                compact_body(&body)
+            );
+        }
+
+        Ok(body)
+    }
+
     pub async fn list_files_recursive(&self, root: &str) -> Result<Vec<DropboxRemoteFile>> {
         let url = format!("{}/2/files/list_folder", self.api_base_url);
         let response = self
