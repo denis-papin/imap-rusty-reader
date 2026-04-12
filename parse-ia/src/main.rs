@@ -1,6 +1,5 @@
 mod config;
 mod logging;
-mod metadata;
 mod parser;
 mod pdf_text;
 mod utils;

@@ -10,7 +10,6 @@ use mailparse::{DispositionType, MailHeaderMap, ParsedMail};
 use regex::Regex;
 use serde::Serialize;
 
-use crate::metadata::embed_custom_metadata;
 use crate::pdf_text::extract_pdf_text;
 use crate::utils::{
     file_stem_or_name, make_unique_path, normalize_display_name, sanitize_filename,
@@ -63,7 +62,6 @@ struct AttachmentRecord {
 
 #[derive(Debug)]
 struct ExtractedAttachment {
-    path: Option<PathBuf>,
     record: AttachmentRecord,
 }
 
@@ -202,7 +200,8 @@ impl BackupParser {
 
         let mut written_sidecars = 0usize;
         for attachment in &attachments {
-            match self.write_attachment_bundle(&parsed, &email_output_folder, &context, attachment) {
+            match self.write_attachment_bundle(&parsed, &email_output_folder, &context, attachment)
+            {
                 Ok(()) => written_sidecars += 1,
                 Err(error) => warn!(
                     "💣 Unable to write attachment metadata [{} / {}]: {error:#}",
@@ -253,12 +252,6 @@ impl BackupParser {
         fs::write(&json_path, &payload)
             .with_context(|| format!("unable to write {}", json_path.display()))?;
         self.write_email_xml(parsed, email_output_folder, &record, &payload, &stem)?;
-        if let Err(error) = self.embed_metadata_into_attachment(attachment, &json_path) {
-            warn!(
-                "💣 Unable to embed custom metadata into attachment [{}]: {error:#}",
-                attachment.record.original_name
-            );
-        }
 
         Ok(())
     }
@@ -306,7 +299,6 @@ impl BackupParser {
                                 target_path.display()
                             );
                             attachments.push(ExtractedAttachment {
-                                path: None,
                                 record: self.build_attachment_record(
                                     &final_name,
                                     None,
@@ -319,7 +311,6 @@ impl BackupParser {
                         }
 
                         attachments.push(ExtractedAttachment {
-                            path: Some(target_path.clone()),
                             record: self.build_attachment_record(
                                 target_path
                                     .file_name()
@@ -338,7 +329,6 @@ impl BackupParser {
                             final_name
                         );
                         attachments.push(ExtractedAttachment {
-                            path: None,
                             record: self.build_attachment_record(
                                 &final_name,
                                 None,
@@ -416,26 +406,6 @@ impl BackupParser {
         }
 
         record
-    }
-
-    fn embed_metadata_into_attachment(
-        &self,
-        attachment: &ExtractedAttachment,
-        json_path: &Path,
-    ) -> Result<()> {
-        let Some(path) = attachment.path.as_deref() else {
-            return Ok(());
-        };
-
-        let payload = fs::read_to_string(json_path)
-            .with_context(|| format!("unable to read {}", json_path.display()))?;
-
-        if path.is_file() {
-            embed_custom_metadata(path, &payload)
-                .with_context(|| format!("unable to inject doka metadata into {}", path.display()))?;
-        }
-
-        Ok(())
     }
 
     fn write_email_xml(

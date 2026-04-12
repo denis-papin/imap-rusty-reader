@@ -168,15 +168,6 @@ pub fn compute_dropbox_content_hash(path: &Path) -> Result<String> {
     Ok(hex_sha256(&block_digests))
 }
 
-pub fn compute_dropbox_content_hash_bytes(bytes: &[u8]) -> String {
-    let mut block_digests = Vec::new();
-    for chunk in bytes.chunks(DROPBOX_CONTENT_HASH_BLOCK_BYTES) {
-        let digest = Sha256::digest(chunk);
-        block_digests.extend_from_slice(&digest);
-    }
-    hex_sha256(&block_digests)
-}
-
 fn hex_sha256(bytes: &[u8]) -> String {
     let final_digest = Sha256::digest(bytes);
     final_digest
@@ -197,8 +188,7 @@ fn fallback_file_name(original_file_name: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_dropbox_file_path, compute_dropbox_content_hash_bytes, ensure_original_extension,
-        folder_prefixes, normalize_dropbox_root,
+        build_dropbox_file_path, ensure_original_extension, folder_prefixes, normalize_dropbox_root,
     };
 
     #[test]
@@ -234,14 +224,6 @@ mod tests {
                 "/Archives/DENIS".to_string(),
                 "/Archives/DENIS/IMPOTS".to_string()
             ]
-        );
-    }
-
-    #[test]
-    fn computes_dropbox_content_hash_for_bytes() {
-        assert_eq!(
-            compute_dropbox_content_hash_bytes(b"hello world"),
-            "bc62d4b80d9e36da29c16c5d4d9f11731f36052c72401a76c23c0fb5a9b74423"
         );
     }
 }
