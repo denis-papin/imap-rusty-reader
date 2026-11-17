@@ -103,8 +103,12 @@ impl EnrichmentRunner {
             return Ok(());
         }
 
-        let api_key = std::env::var("OPENAI_API_KEY")
-            .with_context(|| "OPENAI_API_KEY is required for ai-enrich")?;
+        let api_key = cobra_config::resolve_secret(
+            self.config
+                .ai_api_key
+                .as_deref()
+                .unwrap_or("=${OPENAI_API_KEY}"),
+        )?;
         let client = OpenAiClient::new(
             api_key,
             self.config.ai_base_url.as_deref(),

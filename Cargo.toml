@@ -1,5 +1,5 @@
 [workspace]
-members = ["imap-rusty-reader", "parse-ia", "ai-enrich", "dropbox-filer"]
+members = ["cobra-config", "imap-rusty-reader", "parse-ia", "ai-enrich", "dropbox-filer"]
 default-members = ["imap-rusty-reader", "parse-ia", "ai-enrich", "dropbox-filer"]
 resolver = "3"
 

@@ -1,18 +1,23 @@
 emailFolder: /mnt/backup/EMAILS_FOLDER
 parseIaFolder: _parse-ai
 aiEnabled: true
+aiApiKey: "=${OPENAI_API_KEY}"
 aiModel: gpt-4o-mini
 aiAgentsFile: ./AGENTS.md
 aiOutputSuffix: .ai.json
 dropboxRootFolder: COBRA_TEST
+# Avec authentification Dropbox par jeton de renouvellement :
+# dropboxAppKey: "=${DROPBOX_APP_KEY}"
+# dropboxAppSecret: "=${DROPBOX_APP_SECRET}"
+# dropboxRefreshToken: "=${DROPBOX_REFRESH_TOKEN}"
 
 accounts:
   -
     name: Gestion Fastmail
     group: true
     recover: false
-    login: gestion@example.com
-    password: secret
+    login: gestion@exemple.com
+    password: "${PASS_GESTION_EXEMPLE_COM}"
     server: imap.example.com
     port: 993
     sslEnabled: true

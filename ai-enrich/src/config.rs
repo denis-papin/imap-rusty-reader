@@ -54,6 +54,8 @@ pub struct Config {
         default = "default_ai_prompt_cache_prefix"
     )]
     pub ai_prompt_cache_prefix: String,
+    #[serde(rename = "aiApiKey")]
+    pub ai_api_key: Option<String>,
     #[serde(rename = "aiBaseUrl")]
     pub ai_base_url: Option<String>,
     pub accounts: Vec<Account>,

@@ -110,8 +110,15 @@ cargo run -p dropbox-filer -- /mnt/backup/imap-reader-conf/config_test.yml
 
 ## Environment Variables
 
+Dans `config.yml`, `password: "${PASS_GESTION_EXEMPLE_COM}"` utilise la variable exportée pour le login `gestion@exemple.com`. Pour nommer la variable, préfixer le login par `PASS_`, mettre les lettres en majuscules et remplacer chaque caractère hors de `A-Z` et `0-9` par `_`. Recopier le même nom dans le champ `password` du compte et dans le fichier de variables. Le même mécanisme s’applique à `aiApiKey` et aux identifiants Dropbox. Pour le VPS, copier `secrets.env.example` dans `/root/cobra/config/secrets.env` (mode 600), renseigner les valeurs et associer chaque compte à sa variable dans `/root/cobra/config/config.yml`. Dans `/root/cobra/bin/run.sh`, remplacer les exports existants par le chargement suivant avant le lancement du pipeline :
+
+```bash
+# Ce fichier privé (mode 600) contient les affectations shell des variables.
+. /root/cobra/config/secrets.env || exit 1
+```
+
 ### `ai-enrich`
-- `OPENAI_API_KEY`
+- `OPENAI_API_KEY` par défaut, ou une variable choisie dans `aiApiKey`
 
 ### `dropbox-filer`
 - soit `DROPBOX_ACCESS_TOKEN`

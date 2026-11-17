@@ -29,7 +29,7 @@ Le programme lit un ou plusieurs comptes IMAP, reconstruit un index local des `M
 - logs compatibles avec ceux du programme Java
 
 ## Configuration
-Le programme lit exactement le même format YAML que le projet Java.
+Le programme accepte le format YAML du projet Java et les références aux variables d’environnement décrites ci-dessous.
 
 Exemple :
 
@@ -37,6 +37,7 @@ Exemple :
 emailFolder: /mnt/backup/EMAILS_FOLDER
 parseIaFolder: _parse-ai
 aiEnabled: true
+aiApiKey: "=${OPENAI_API_KEY}"
 aiModel: gpt-4o-mini
 aiAgentsFile: ./AGENTS.md
 aiOutputSuffix: .ai.json
@@ -47,8 +48,8 @@ accounts:
     name: Gestion Fastmail
     group: true
     recover: false
-    login: gestion@example.com
-    password: secret
+    login: gestion@exemple.com
+    password: "${PASS_GESTION_EXEMPLE_COM}"
     server: imap.example.com
     port: 993
     sslEnabled: true
@@ -57,6 +58,18 @@ accounts:
     imapInFolder:
       - INBOX
 ```
+
+Pour les mots de passe IMAP, `aiApiKey` et les identifiants Dropbox, une valeur entière comme `"=${MY_ENV_VAR}"` ou `"${MY_ENV_VAR}"` lit la variable exportée au lancement du programme. Les valeurs littérales restent acceptées. Une référence utilisée dont la variable est absente ou vide provoque une erreur. Avec cron, charge les variables dans le script de lancement, par exemple depuis un fichier privé hors du dépôt contenant les lignes `export`.
+
+Exemple pour Dropbox avec un jeton de renouvellement :
+
+```yaml
+dropboxAppKey: "=${COBRA_DROPBOX_KEY}"
+dropboxAppSecret: "=${COBRA_DROPBOX_SECRET}"
+dropboxRefreshToken: "=${COBRA_DROPBOX_REFRESH_TOKEN}"
+```
+
+Les variables Dropbox standard déjà exportées gardent la priorité sur les champs YAML correspondants.
 
 ### Champs supportés
 - `emailFolder` : dossier racine de sauvegarde des emails
@@ -199,7 +212,7 @@ il appelle OpenAI via la Responses API et écrit :
 - `<email>.ai.error.json` : diagnostic si un email échoue
 
 Par défaut :
-- la clé API est lue depuis `OPENAI_API_KEY`
+- la clé API est lue depuis `aiApiKey`, ou depuis `OPENAI_API_KEY` si le champ est omis
 - les pièces jointes texte sont injectées sous forme de texte
 - les PDF sont extraits côté `parse-ia` et `ai-enrich` réutilise ce texte ; le PDF brut n’est plus envoyé à OpenAI
 - les images brutes sont désactivées sauf si `aiSendRawImages: true`

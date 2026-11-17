@@ -50,7 +50,11 @@ pub fn load_config(path: Option<&str>) -> Result<Config> {
 
     let content = fs::read_to_string(Path::new(path))
         .with_context(|| format!("unable to read config file {}", path))?;
-    let config = serde_yaml::from_str::<Config>(&content)
+    let mut config = serde_yaml::from_str::<Config>(&content)
         .with_context(|| format!("unable to parse YAML config {}", path))?;
+    for account in &mut config.accounts {
+        account.password = cobra_config::resolve_secret(&account.password)
+            .with_context(|| format!("unable to load IMAP password for {}", account.name))?;
+    }
     Ok(config)
 }

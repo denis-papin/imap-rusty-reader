@@ -16,25 +16,19 @@ struct OAuthTokenResponse {
 }
 
 pub async fn resolve_access_token(config: &Config) -> Result<String> {
-    if let Some(token) = first_non_empty(&[
-        std::env::var("DROPBOX_ACCESS_TOKEN").ok(),
-        config.dropbox_access_token.clone(),
-    ]) {
+    if let Some(token) = credential(
+        "DROPBOX_ACCESS_TOKEN",
+        config.dropbox_access_token.as_deref(),
+    )? {
         return Ok(token);
     }
 
-    let app_key = first_non_empty(&[
-        std::env::var("DROPBOX_APP_KEY").ok(),
-        config.dropbox_app_key.clone(),
-    ]);
-    let app_secret = first_non_empty(&[
-        std::env::var("DROPBOX_APP_SECRET").ok(),
-        config.dropbox_app_secret.clone(),
-    ]);
-    let refresh_token = first_non_empty(&[
-        std::env::var("DROPBOX_REFRESH_TOKEN").ok(),
-        config.dropbox_refresh_token.clone(),
-    ]);
+    let app_key = credential("DROPBOX_APP_KEY", config.dropbox_app_key.as_deref())?;
+    let app_secret = credential("DROPBOX_APP_SECRET", config.dropbox_app_secret.as_deref())?;
+    let refresh_token = credential(
+        "DROPBOX_REFRESH_TOKEN",
+        config.dropbox_refresh_token.as_deref(),
+    )?;
     let oauth_token_url = first_non_empty(&[
         std::env::var("DROPBOX_OAUTH_TOKEN_URL").ok(),
         config.dropbox_oauth_token_url.clone(),
@@ -98,6 +92,17 @@ async fn fetch_access_token(
         ));
     }
     Ok(payload.access_token)
+}
+
+fn credential(env_name: &str, configured: Option<&str>) -> Result<Option<String>> {
+    if let Some(value) = first_non_empty(&[std::env::var(env_name).ok()]) {
+        return Ok(Some(value));
+    }
+    configured
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(cobra_config::resolve_secret)
+        .transpose()
 }
 
 fn first_non_empty(values: &[Option<String>]) -> Option<String> {

@@ -48,6 +48,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "cobra-config",
  "env_logger",
  "jsonschema",
  "log",
@@ -655,6 +656,13 @@ name = "clap_lex"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
+
+[[package]]
+name = "cobra-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+]
 
 [[package]]
 name = "colorchoice"
@@ -1486,6 +1494,7 @@ dependencies = [
  "arrow-schema",
  "chrono",
  "clap",
+ "cobra-config",
  "datafusion",
  "env_logger",
  "html-escape",
@@ -2176,6 +2185,7 @@ dependencies = [
  "anyhow",
  "async-imap",
  "chrono",
+ "cobra-config",
  "env_logger",
  "filetime",
  "futures-util",
