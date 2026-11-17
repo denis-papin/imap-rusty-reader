@@ -304,6 +304,10 @@ impl DropboxClient {
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::CONFLICT && is_file_conflict(&body) {
+            bail!("Dropbox already has a file at {remote_path} (409 path/conflict/file)");
+        }
+
         bail!(
             "dropbox upload failed [{}] status {}: {}",
             remote_path,
@@ -311,6 +315,17 @@ impl DropboxClient {
             compact_body(&body)
         );
     }
+}
+
+fn is_file_conflict(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|error| {
+            error["error_summary"]
+                .as_str()
+                .map(|summary| summary.starts_with("path/conflict/file/"))
+        })
+        .unwrap_or(false)
 }
 
 fn compact_body(body: &str) -> String {

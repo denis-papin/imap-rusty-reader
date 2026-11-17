@@ -146,6 +146,7 @@ impl DropboxFiler {
 
         let mut processed = 0usize;
         let mut archive_dirty = false;
+        let mut failed = 0usize;
         for job in jobs {
             if let Some(limit) = self.limit
                 && processed >= limit
@@ -166,7 +167,10 @@ impl DropboxFiler {
                         "💣 Dropbox filing failed [{}]: {error:#}",
                         job.folder.display()
                     );
-                    self.write_error_file(&job, &error)?;
+                    failed += 1;
+                    if let Err(report_error) = self.write_error_file(&job, &error) {
+                        warn!("Unable to save Dropbox error report: {report_error:#}");
+                    }
                 }
             }
         }
@@ -180,6 +184,9 @@ impl DropboxFiler {
             );
         }
 
+        if failed > 0 {
+            warn!("Dropbox filing completed with {failed} failed bundle(s) out of {processed}");
+        }
         Ok(())
     }
 
