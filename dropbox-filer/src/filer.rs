@@ -13,8 +13,8 @@ use crate::config::Config;
 use crate::dropbox::DropboxClient;
 use crate::table::{ArchiveRecord, DropboxArchiveTable};
 use crate::utils::{
-    build_dropbox_file_path, compute_dropbox_content_hash, ensure_original_extension,
-    normalize_dropbox_root,
+    build_dropbox_file_path, compute_dropbox_bytes_hash, compute_dropbox_content_hash,
+    ensure_original_extension, normalize_dropbox_root,
 };
 
 const LEGACY_META_SUFFIX: &str = ".dropbox.json";
@@ -61,6 +61,8 @@ struct ParsedEmailMetadata {
 struct ParsedAttachment {
     original_name: String,
     #[serde(default)]
+    is_email_body: bool,
+    #[serde(default)]
     mime_type: String,
     md5: String,
 }
@@ -97,6 +99,7 @@ struct AiAttachmentSummary {
 
 #[derive(Debug, Clone)]
 struct AttachmentUploadPlan {
+    xml_only: bool,
     source_file_name: String,
     local_path: PathBuf,
     md5: String,
@@ -239,7 +242,16 @@ impl DropboxFiler {
         let ai = normalize_ai_classification(ai)?;
         let normalized_ai_payload = serde_json::to_string_pretty(&ai)
             .with_context(|| format!("unable to normalize {}", job.ai_path.display()))?;
-        let Some(attachment_path) = job.attachment_path.as_deref() else {
+        let is_email_body = parsed
+            .attachments
+            .first()
+            .is_some_and(|item| item.is_email_body);
+        let attachment_path = if is_email_body {
+            Some(job.xml_path.as_path())
+        } else {
+            job.attachment_path.as_deref()
+        };
+        let Some(attachment_path) = attachment_path else {
             info!(
                 "😎 Skip metadata-only bundle without local attachment [{}]",
                 job.folder.display()
@@ -282,12 +294,18 @@ impl DropboxFiler {
             return Ok(false);
         }
 
-        let dropbox_content_hash = compute_dropbox_content_hash(&plan.local_path)?;
+        let dropbox_content_hash = if plan.xml_only {
+            compute_dropbox_bytes_hash(plan.enriched_xml_content.as_bytes())
+        } else {
+            compute_dropbox_content_hash(&plan.local_path)?
+        };
         client.ensure_parent_folders(&plan.dropbox_path).await?;
-        client
-            .upload_file(&plan.local_path, &plan.dropbox_path)
-            .await
-            .with_context(|| format!("unable to upload {}", plan.local_path.display()))?;
+        if !plan.xml_only {
+            client
+                .upload_file(&plan.local_path, &plan.dropbox_path)
+                .await
+                .with_context(|| format!("unable to upload {}", plan.local_path.display()))?;
+        }
         client
             .upload_bytes(plan.enriched_xml_content.as_bytes(), &plan.xml_dropbox_path)
             .await
@@ -421,7 +439,7 @@ fn discover_account_jobs(
 fn build_upload_plan(
     dropbox_root_folder: &str,
     attachment_path: &Path,
-    _xml_path: &Path,
+    xml_path: &Path,
     parsed: &ParsedEmailMetadata,
     ai: &AiClassification,
     source_xml_payload: &str,
@@ -442,6 +460,11 @@ fn build_upload_plan(
         .attachments
         .first()
         .ok_or_else(|| anyhow!("parse metadata contains no attachment"))?;
+    let attachment_path = if parsed_attachment.is_email_body {
+        xml_path
+    } else {
+        attachment_path
+    };
     let source_file_name = attachment_path
         .file_name()
         .and_then(|value| value.to_str())
@@ -466,6 +489,7 @@ fn build_upload_plan(
     let year_folder = resolve_year_folder(parsed, &[attachment])?;
 
     Ok(Some(AttachmentUploadPlan {
+        xml_only: parsed_attachment.is_email_body,
         source_file_name,
         local_path: attachment_path.to_path_buf(),
         md5: parsed_attachment.md5.clone(),
@@ -672,6 +696,7 @@ mod tests {
                 expedition_date: Some("2023-03-15T12:34:56+00:00".to_string()),
                 attachments: vec![ParsedAttachment {
                     original_name: "courrier.pdf".to_string(),
+                    is_email_body: false,
                     mime_type: "application/pdf".to_string(),
                     md5: "abc".to_string(),
                 }],
@@ -697,6 +722,7 @@ mod tests {
         .unwrap();
 
         let plan = plan.expect("expected one plan");
+        assert!(!plan.xml_only);
         assert_eq!(
             plan.dropbox_path,
             "/Archives/A_TRAITER/2024-03-15 techvalley fin-contrat.pdf"
@@ -713,6 +739,48 @@ mod tests {
             plan.enriched_xml_content
                 .contains("\"sub_folder\":\"LEGAL\"")
         );
+    }
+
+    #[test]
+    fn discovers_and_plans_a_standalone_email_xml() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().join("message");
+        std::fs::create_dir(&folder).unwrap();
+        let parsed_payload = r#"{"attachments":[{"original_name":"email-body.xml","is_email_body":true,"mime_type":"application/xml","md5":"source-email-hash"}],"expedition_date":"2026-11-17T10:00:00Z"}"#;
+        let ai_payload = r#"{"attachment_summaries":[{"file_name":"email-body.xml","proposed_file_name":"2026-11-17 alice engagement.pdf","main_folder":"DENIS","sub_folder":"LEGAL"}]}"#;
+        std::fs::write(folder.join("email-body.json"), parsed_payload).unwrap();
+        std::fs::write(
+            folder.join("email-body.xml"),
+            "<email-content></email-content>",
+        )
+        .unwrap();
+        std::fs::write(folder.join("email-body.ai.json"), ai_payload).unwrap();
+        let jobs = super::discover_account_jobs(temp.path(), "account", ".ai.json").unwrap();
+        assert_eq!(jobs.len(), 1);
+        let job = &jobs[0];
+        assert!(job.attachment_path.is_none());
+        let plan = build_upload_plan(
+            "/Archives",
+            &job.xml_path,
+            &job.xml_path,
+            &serde_json::from_str(parsed_payload).unwrap(),
+            &serde_json::from_str(ai_payload).unwrap(),
+            "<email-content></email-content>",
+            ai_payload,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(plan.xml_only);
+        assert_eq!(
+            plan.dropbox_path,
+            "/Archives/A_TRAITER/2026-11-17 alice engagement.xml"
+        );
+        assert_eq!(plan.dropbox_path, plan.xml_dropbox_path);
+        assert_eq!(plan.md5, "source-email-hash");
+        assert_eq!(plan.main_folder, "DENIS");
+        assert_eq!(plan.sub_folder, "LEGAL");
+        assert_eq!(plan.year_folder, "2026");
+        assert!(plan.enriched_xml_content.contains("<ai-enrich>"));
     }
 
     #[test]

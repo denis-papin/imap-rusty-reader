@@ -64,6 +64,8 @@ struct ParsedEmailMetadata {
 struct ParsedAttachmentMetadata {
     original_name: String,
     #[serde(default)]
+    is_email_body: bool,
+    #[serde(default)]
     size: u64,
     mime_type: String,
     #[serde(default)]
@@ -344,6 +346,17 @@ impl EnrichmentRunner {
             .map(|value| value.to_string())
             .unwrap_or_else(|| attachment.original_name.clone());
 
+        if attachment.is_email_body {
+            return Ok(vec![AttachmentSource::PromptOnly(AttachmentPromptInput {
+                file_name: attachment.original_name.clone(),
+                mime_type: attachment.mime_type.clone(),
+                size: attachment.size,
+                ingestion_mode: "email_body".to_string(),
+                extracted_text: None,
+                note: Some("Virtual attachment representing the email body provided in the XML. No physical attachment is expected. Produce exactly one attachment_summaries entry for this email body, with its summary, importance, proposed_file_name ending in .xml, main_folder and sub_folder.".to_string()),
+            })]);
+        }
+
         if let Some(extracted_text) = attachment.extracted_text.as_ref() {
             let note = attachment.extracted_text_method.as_deref().map(|method| {
                 match attachment.extracted_text_truncated.unwrap_or(false) {
@@ -390,7 +403,9 @@ impl EnrichmentRunner {
                 size,
                 ingestion_mode: "skipped".to_string(),
                 extracted_text: None,
-                note: Some("Attachment skipped because it exceeded aiMaxAttachmentBytes".to_string()),
+                note: Some(
+                    "Attachment skipped because it exceeded aiMaxAttachmentBytes".to_string(),
+                ),
             })]);
         }
 
@@ -956,6 +971,64 @@ fn error_sidecar_path(folder: &Path, stem: &str) -> PathBuf {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[tokio::test]
+    async fn virtual_attachment_uses_email_body_without_uploading_a_file() {
+        let runner = EnrichmentRunner {
+            config: serde_json::from_value(json!({"emailFolder":"/unused", "accounts":[]}))
+                .unwrap(),
+            agents_path: PathBuf::new(),
+            force: false,
+            limit: None,
+            account_filter: None,
+            dry_run: true,
+        };
+        let client =
+            OpenAiClient::new("test".to_string(), Some("http://127.0.0.1:1"), 1, 0).unwrap();
+        let job = EmailJob {
+            account_name: "test".to_string(),
+            folder: PathBuf::new(),
+            stem: "email-body".to_string(),
+            json_path: PathBuf::new(),
+            xml_path: PathBuf::new(),
+            attachment_path: None,
+        };
+        let metadata = serde_json::from_value(json!({"attachments":[{
+            "original_name":"email-body.xml", "mime_type":"application/xml", "is_email_body":true
+        }]}))
+        .unwrap();
+        let inputs = runner
+            .build_attachment_inputs(&client, &job, &metadata)
+            .await
+            .unwrap();
+        assert_eq!(inputs.len(), 1);
+        let AttachmentSource::PromptOnly(input) = &inputs[0] else {
+            panic!("unexpected file upload")
+        };
+        assert_eq!(input.ingestion_mode, "email_body");
+        assert_eq!(input.file_name, "email-body.xml");
+        assert!(
+            input
+                .note
+                .as_ref()
+                .unwrap()
+                .contains("exactly one attachment_summaries")
+        );
+
+        // Missing real attachments retain the existing metadata-only behavior.
+        let metadata = serde_json::from_value(json!({"attachments":[{
+            "original_name":"missing.pdf", "mime_type":"application/pdf"
+        }]}))
+        .unwrap();
+        let inputs = runner
+            .build_attachment_inputs(&client, &job, &metadata)
+            .await
+            .unwrap();
+        let AttachmentSource::PromptOnly(input) = &inputs[0] else {
+            panic!("unexpected file upload")
+        };
+        assert_eq!(input.ingestion_mode, "metadata_only");
+    }
 
     #[test]
     fn text_like_detection_matches_expected_extensions() {

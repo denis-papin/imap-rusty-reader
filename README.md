@@ -154,6 +154,12 @@ Le JSON contient notamment :
 - pour les PDF, un texte extrait quand il est disponible
 - pour les PDF image, une tentative d’OCR quand `pdftoppm` et `tesseract` sont disponibles sur la machine
 
+Pour un email sans pièce jointe exploitable (y compris avec seulement des images intégrées ignorées), `parse-ia` crée `email-body.json` et `email-body.xml`. Le XML garde la même structure : métadonnées dans `doka-custom` et corps du message dans `mime-structure`. Aucun PDF, fichier texte ou autre document miroir n'est créé.
+
+Une entrée virtuelle `attachments[0]`, nommée `email-body.xml` et marquée `is_email_body: true`, permet de réutiliser le pipeline par pièce jointe. Son `md5` porte sur le `.eml` source et sa taille est celle du `.eml`. Les métadonnées des vraies pièces jointes restent inchangées. L'IA utilise le corps du message pour produire la même entrée `attachment_summaries` (résumé, importance, nom proposé et classement).
+
+Les emails sans pièce jointe précédemment ignorés seront pris en charge à la prochaine exécution de `parse-ia`. Les dossiers déjà parsés restent ignorés, comme auparavant. Cette prise en charge concerne tous les emails sans pièce jointe exploitable, pas seulement ceux que l'IA jugera importants.
+
 Le XML :
 - ignore les pièces jointes
 - conserve la structure MIME utile pour distinguer les différentes parties du message
@@ -262,6 +268,8 @@ il :
 - enrichit ce XML avec une balise `<ai-enrich><![CDATA[...]]></ai-enrich>` contenant le JSON normalisé de `<email>.ai.json`
 - crée les dossiers distants manquants via l’API Dropbox
 - uploade le fichier et son XML
+- pour `is_email_body: true`, uploade uniquement le XML enrichi, avec le nom proposé normalisé et l'extension `.xml`, dans `A_TRAITER` ; une vraie pièce jointe manquante reste ignorée
+- pour ce XML autonome, la table Parquet garde le MD5 du `.eml` source pour la déduplication et le checksum Dropbox du XML enrichi envoyé ; les chemins document et XML désignent le même fichier
 - laisse tous les fichiers locaux en place après traitement, y compris les pièces jointes, métadonnées et `.eml` source
 
 Le programme écrit aussi :

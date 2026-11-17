@@ -17,6 +17,7 @@ Produire un dossier JSON compact, fiable et directement exploitable pour le clas
 ## Attachment Summary Rules
 
 - Resumer chaque piece jointe individuellement.
+- Si `is_email_body: true`, la piece jointe est virtuelle : le document est le corps de l'email fourni dans le XML. Produire une entree `attachment_summaries` pour ce corps, avec resume, importance, nom propose en `.xml` et classement habituel. L'absence de fichier miroir est normale.
 - Si une piece jointe n'est pas lisible, l'indiquer clairement.
 - Renseigner `proposed_file_name` pour chaque piece jointe au format `yyyy-mm-dd <emetteur-short> <motif>`.
 - Conserver l'extension d'origine quand elle est connue.

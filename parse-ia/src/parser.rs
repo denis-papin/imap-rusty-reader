@@ -49,6 +49,8 @@ struct HeaderContact {
 #[derive(Debug, Clone, Serialize)]
 struct AttachmentRecord {
     original_name: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    is_email_body: bool,
     mime_type: String,
     size: usize,
     md5: String,
@@ -175,10 +177,20 @@ impl BackupParser {
         let parsed = mailparse::parse_mail(&raw)
             .with_context(|| format!("unable to parse {}", email_path.display()))?;
 
-        let attachments = self.extract_attachments(&parsed, &email_output_folder)?;
+        let mut attachments = self.extract_attachments(&parsed, &email_output_folder)?;
         if attachments.is_empty() {
-            info!("😎 No attachment found [{}]", email_path.display());
-            return Ok(());
+            info!("😎 Create email-body metadata [{}]", email_path.display());
+            // A virtual attachment keeps the existing per-document pipeline intact.
+            // Hash the source email, so messages with the same body remain distinct.
+            let mut record = self.build_attachment_record(
+                "email-body.xml",
+                None,
+                raw.len(),
+                "application/xml",
+                Some(&raw),
+            );
+            record.is_email_body = true;
+            attachments.push(ExtractedAttachment { record });
         }
 
         let context = ParsedEmailContext {
@@ -360,6 +372,7 @@ impl BackupParser {
     ) -> AttachmentRecord {
         let mut record = AttachmentRecord {
             original_name: file_name.to_string(),
+            is_email_body: false,
             mime_type: mime_type.to_string(),
             size,
             md5: bytes
@@ -896,4 +909,75 @@ fn strip_html_blocks(value: &str) -> String {
         .expect("invalid regex")
         .replace_all(&cleaned, " ")
         .into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn parse_fixture(body: &str) -> (tempfile::TempDir, BackupParser, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let parser = BackupParser::new(temp.path().to_str().unwrap(), "parse-ai", "account");
+        fs::create_dir_all(parser.account_folder.join("INBOX")).unwrap();
+        let email = parser.account_folder.join("INBOX/message.eml");
+        fs::write(&email, format!(
+            "From: Alice <alice@example.org>\r\nTo: Bob <bob@example.org>\r\nSubject: Engagement\r\nDate: Tue, 17 Nov 2026 10:00:00 +0100\r\nMessage-ID: <test@example.org>\r\nMIME-Version: 1.0\r\n{body}"
+        )).unwrap();
+        parser.parse_email_inner(&email).unwrap();
+        (temp, parser, email)
+    }
+
+    #[test]
+    fn body_only_emails_produce_metadata_without_a_physical_attachment() {
+        for body in [
+            "Content-Type: text/plain; charset=utf-8\r\n\r\nAccord confirmé.",
+            "Content-Type: text/html; charset=utf-8\r\n\r\n<p>Accord confirmé.</p>",
+            "Content-Type: multipart/alternative; boundary=alt\r\n\r\n--alt\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nAccord confirmé.\r\n--alt\r\nContent-Type: text/html\r\n\r\n<p>Duplicate HTML</p>\r\n--alt--\r\n",
+            "Content-Type: multipart/related; boundary=rel\r\n\r\n--rel\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nAccord confirmé.\r\n--rel\r\nContent-Type: image/png; name=image001.png\r\nContent-Disposition: inline; filename=image001.png\r\nContent-ID: <logo>\r\n\r\nlogo\r\n--rel--\r\n",
+        ] {
+            let (_temp, parser, email) = parse_fixture(body);
+            let output = parser.parse_folder.join("INBOX/message");
+            let json: Value =
+                serde_json::from_str(&fs::read_to_string(output.join("email-body.json")).unwrap())
+                    .unwrap();
+            assert_eq!(json["attachments"].as_array().unwrap().len(), 1);
+            assert_eq!(json["attachments"][0]["is_email_body"], true);
+            assert_eq!(json["attachments"][0]["original_name"], "email-body.xml");
+            assert_eq!(
+                json["attachments"][0]["md5"],
+                format!("{:x}", md5::compute(fs::read(&email).unwrap()))
+            );
+            let xml_path = output.join("email-body.xml");
+            let xml = fs::read_to_string(&xml_path).unwrap();
+            assert!(xml.contains("<email-content"));
+            assert!(xml.contains("<doka-custom format=\"json\">"));
+            assert!(xml.contains("Accord confirmé."));
+            assert!(!xml.contains("Duplicate HTML"));
+            assert_eq!(fs::read_dir(&output).unwrap().count(), 2);
+            // A later run must not overwrite an existing bundle.
+            fs::write(&xml_path, "already processed").unwrap();
+            parser.parse_email_inner(&email).unwrap();
+            assert_eq!(fs::read_to_string(xml_path).unwrap(), "already processed");
+        }
+    }
+
+    #[test]
+    fn physical_attachment_keeps_existing_bundle_and_metadata_shape() {
+        let (_temp, parser, _) = parse_fixture(
+            "Content-Type: multipart/mixed; boundary=mix\r\n\r\n--mix\r\nContent-Type: text/plain\r\n\r\nSee document.\r\n--mix\r\nContent-Type: text/plain; name=contract.txt\r\nContent-Disposition: attachment; filename=contract.txt\r\n\r\nContract content\r\n--mix--\r\n",
+        );
+        let output = parser.parse_folder.join("INBOX/message");
+        assert_eq!(
+            fs::read_to_string(output.join("contract.txt")).unwrap(),
+            "Contract content\r\n"
+        );
+        assert!(output.join("contract.xml").exists());
+        let json: Value =
+            serde_json::from_str(&fs::read_to_string(output.join("contract.json")).unwrap())
+                .unwrap();
+        assert!(json["attachments"][0].get("is_email_body").is_none());
+        assert!(!output.join("email-body.xml").exists());
+        assert_eq!(fs::read_dir(output).unwrap().count(), 3);
+    }
 }

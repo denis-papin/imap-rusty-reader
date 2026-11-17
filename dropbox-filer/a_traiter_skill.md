@@ -35,3 +35,10 @@ Exemple :
 - Attention : Le main folder et sub folder ne suffise pas, regarde bien le contexte du dossier ECM pour comprendre la nature des dossiers et ainsi pouvoir confirmer la validité ou non des tags main_folder et sub_folder.
 
 - Ne supprime aucun fichier ni dossier tant que celui ci n'a pas été déplacé correctement avec son fichier xml associé.
+
+
+### Emails sans pièce jointe : XML autonome
+
+- Un XML dont `doka-custom.attachments[0].is_email_body` vaut `true` représente lui-même le document (le corps de l'email). Il n'a volontairement aucun PDF ou autre fichier miroir.
+- Pour ce cas uniquement, normaliser le nom du XML au même format `yyyy-mm-dd <origine> <objet>.xml`, puis déplacer ce XML seul vers le dossier métier annuel. Utiliser l'entrée virtuelle de `attachment_summaries` pour les tags `main_folder` et `sub_folder`, et le corps du message pour confirmer le classement.
+- Un XML sans ce marqueur reste une métadonnée compagnon : ne pas le traiter comme un email autonome si son document source manque.

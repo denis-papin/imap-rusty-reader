@@ -168,6 +168,14 @@ pub fn compute_dropbox_content_hash(path: &Path) -> Result<String> {
     Ok(hex_sha256(&block_digests))
 }
 
+pub fn compute_dropbox_bytes_hash(bytes: &[u8]) -> String {
+    let mut block_digests = Vec::new();
+    for block in bytes.chunks(DROPBOX_CONTENT_HASH_BLOCK_BYTES) {
+        block_digests.extend_from_slice(&Sha256::digest(block));
+    }
+    hex_sha256(&block_digests)
+}
+
 fn hex_sha256(bytes: &[u8]) -> String {
     let final_digest = Sha256::digest(bytes);
     final_digest
@@ -225,5 +233,24 @@ mod tests {
                 "/Archives/DENIS/IMPOTS".to_string()
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod email_body_hash_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn in_memory_hash_matches_uploaded_file_hash_across_block_boundaries() {
+        for size in [0, 42, DROPBOX_CONTENT_HASH_BLOCK_BYTES + 17] {
+            let bytes = vec![b'x'; size];
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            file.write_all(&bytes).unwrap();
+            assert_eq!(
+                compute_dropbox_bytes_hash(&bytes),
+                compute_dropbox_content_hash(file.path()).unwrap()
+            );
+        }
     }
 }
