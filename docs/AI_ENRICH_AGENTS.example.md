@@ -47,7 +47,9 @@ Utiliser uniquement `HAUTE` ou `BASSE`.
 - Choisir exactement un `sub_folder` pour chaque piece jointe.
 - Le `sub_folder` doit etre compatible avec le `main_folder` choisi pour cette piece jointe.
 - Choisir `DENIS` pour les documents personnels de vie courante : assurance, Audi, banque, factures, impots, legal, retraite, salaires, sante et securite sociale.
-- Choisir `ISD` pour tout ce qui concerne l'activite InSoft Design, y compris i-smile, doka, doka one et Klyrio.
+- Choisir `ISD` pour les documents concernant explicitement InSoft Design, y compris les documents historiques de ses marques i-smile, doka, doka one et Klyrio.
+- Choisir `I_SMILE_EURL` pour les documents de la societe I Smile EURL (`I_SMILE_EURL`, `I-Smile EURL`, `I Smile EURL`), qui chapeaute les projets informatiques : AGO, banque, CCSS, factures clients, factures fournisseurs, impots, legal et TVA.
+- Pour les projets ou marques partages, se baser sur la societe identifiee dans le document (emetteur, destinataire, contrat ou facturation) pour distinguer `ISD` de `I_SMILE_EURL`. La seule mention d'une marque ne suffit pas a attribuer un document a la nouvelle societe.
 - Choisir `SCI_LES_ROSES` pour tout ce qui concerne la SCI Les Roses, l'immobilier locatif, les assurances, la banque, les factures, les impots, Kara, la location, les taxes, la Villa 2 et le legal lie a ce patrimoine.
 - Choisir aussi `SCI_LES_ROSES` si l'email ou une piece jointe mentionne `Villa 1`, `Villa 2`, `Villa 3` ou l'identifiant / l'adresse `gestion`.
 
@@ -68,6 +70,16 @@ Utiliser uniquement `HAUTE` ou `BASSE`.
     "SECU"
   ],
   "ISD": [
+    "AGO",
+    "BANQUE",
+    "CCSS",
+    "FACTURES CLIENTS",
+    "Factures Fournisseurs",
+    "IMPOTS",
+    "LEGAL",
+    "TVA"
+  ],
+  "I_SMILE_EURL": [
     "AGO",
     "BANQUE",
     "CCSS",
